@@ -16,6 +16,7 @@ import {
   CascadeRiskLevel,
   CvdOiMatrixCell,
   CvdOiMatrixReport,
+  CvdDirectionState,
   DirectionState,
   DerivativesData,
   FundingState,
@@ -47,8 +48,16 @@ export function computeCvdOiDivergenceMatrix(
   const priceDirection: DirectionState = priceChangePct > 0.08 ? 'UP' : (priceChangePct < -0.08 ? 'DOWN' : 'FLAT');
 
   // ۲. محاسبه تغییرات CVD
-  const cvdDeltaUsd = orderFlow?.takerDelta ?? (priceChangePct > 0 ? 12000000 : -12000000);
-  const cvdDirection: DirectionState = cvdDeltaUsd > 2000000 ? 'UP' : (cvdDeltaUsd < -2000000 ? 'DOWN' : 'FLAT');
+  const hasFreshTradeFlow = orderFlow?.isRealTradeFlow === true &&
+    orderFlow.status === 'LIVE' &&
+    typeof orderFlow.ageMs === 'number' &&
+    orderFlow.ageMs <= 5000 &&
+    typeof orderFlow.cvdDeltaUsd === 'number' &&
+    Number.isFinite(orderFlow.cvdDeltaUsd);
+  const cvdDeltaUsd = hasFreshTradeFlow ? orderFlow.cvdDeltaUsd : null;
+  const cvdDirection: CvdDirectionState = cvdDeltaUsd === null
+    ? 'UNKNOWN'
+    : cvdDeltaUsd > 0 ? 'UP' : cvdDeltaUsd < 0 ? 'DOWN' : 'FLAT';
 
   // ۳. محاسبه تغییرات Open Interest (OI)
   const openInterestChangePct = derivatives?.oi ? Number((((derivatives.oi - 10000) / 10000) * 10).toFixed(2)) : (Math.abs(priceChangePct) * 1.2);
@@ -139,10 +148,10 @@ export function computeCvdOiDivergenceMatrix(
     },
     {
       dimensionName: 'دلتای حجم (CVD)',
-      valueText: `$${(cvdDeltaUsd / 1000000).toFixed(1)}M`,
+      valueText: cvdDeltaUsd === null ? 'UNKNOWN' : `$${(cvdDeltaUsd / 1000000).toFixed(1)}M`,
       state: cvdDirection,
       scoreContribution: cvdDirection === 'UP' ? 25 : (cvdDirection === 'DOWN' ? -25 : 0),
-      isDivergent: priceDirection !== cvdDirection && priceDirection !== 'FLAT' && cvdDirection !== 'FLAT',
+      isDivergent: cvdDirection !== 'UNKNOWN' && priceDirection !== cvdDirection && priceDirection !== 'FLAT' && cvdDirection !== 'FLAT',
     },
     {
       dimensionName: 'سود باز (Open Interest)',

@@ -401,7 +401,7 @@ export function evaluateSignalToExecution(
       passed: obiPassed,
       details: isDirectObiConflict
         ? `🛑 تضاد با دیوار سنگین سفارشات نهنگ‌ها (OBI: ${(obi * 100).toFixed(1)}%)`
-        : `عدم تقارن OBI: ${(obi * 100).toFixed(1)}% | دلتای CVD: ${(analysis.cvdDelta || 0).toFixed(1)}`,
+        : `عدم تقارن OBI: ${(obi * 100).toFixed(1)}% | دلتای CVD: ${typeof analysis.cvdDelta === 'number' ? analysis.cvdDelta.toFixed(1) : 'UNKNOWN'}`,
       category: 'ORDER_BOOK_DERIVATIVES',
     },
     {
@@ -773,7 +773,7 @@ export function buildExecutionPosition(
   const scenarioMatrix = evaluateDynamicScenarioMatrix(analysis, aiPrediction);
 
   // 🧠 اجرای مغزهای ۴گانه کوانتومی جهت تعیین دقیق استاپ فشرده، حد آستانه سود صفر و تریلینگ
-  const quantumBrain = runQuantumProcessingBrain(analysis, aiPrediction, analysis.price || 88450);
+  const quantumBrain = runQuantumProcessingBrain(analysis, aiPrediction, analysis.price);
 
   const dynamicKellyMargin = calculateDynamicKellyMargin(
     balance || 1000,

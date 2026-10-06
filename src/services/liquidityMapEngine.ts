@@ -396,8 +396,16 @@ export function generateLiquidityMap(
   // محاسبه کشش مغناطیسی (Magnetism Calculation)
   // "بررسی کن قیمت احتمالاً برای گرفتن کدام نقدینگی حرکت میکند"
   // ==============================================================
-  const flowBias = orderFlow ? (orderFlow.takerDelta > 0 || orderFlow.cvdDelta > 0 ? 1 : -1) : 0;
-  const obiBias = orderFlow ? (orderFlow.takerRatio - 0.5) * 2 : 0; // -1 to +1
+  const hasFreshTradeFlow = orderFlow?.isRealTradeFlow === true &&
+    orderFlow.status === 'LIVE' &&
+    typeof orderFlow.ageMs === 'number' && orderFlow.ageMs <= 5000 &&
+    typeof orderFlow.takerDelta === 'number' &&
+    typeof orderFlow.cvdDelta === 'number' &&
+    typeof orderFlow.takerRatio === 'number';
+  const flowBias = hasFreshTradeFlow
+    ? (orderFlow.takerDelta > 0 || orderFlow.cvdDelta > 0 ? 1 : orderFlow.takerDelta < 0 || orderFlow.cvdDelta < 0 ? -1 : 0)
+    : 0;
+  const obiBias = hasFreshTradeFlow ? (orderFlow.takerRatio - 0.5) * 2 : 0; // -1 to +1
 
   for (const pool of pools) {
     const absDist = Math.abs(pool.distancePct);

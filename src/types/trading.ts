@@ -136,35 +136,45 @@ export interface RealOrderBookImbalance {
   obi: number | null; // Real depth imbalance (bids - asks)/(bids + asks) from orderbook levels
   bidDepthUsd: number;
   askDepthUsd: number;
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  spreadUsd?: number | null;
   levelsCount: number;
   status: FeedStatus;
   timestamp: number;
   ageMs: number;
   latencyMs: number;
   source: string;
-  obiVelocity?: number; // Rate of change of OBI (Item 12)
-  obiAcceleration?: number; // Second derivative of OBI (Item 12)
-  bidWallPersistence?: number; // Milliseconds / Score of bid wall stability (Item 12)
-  askWallPersistence?: number; // Milliseconds / Score of ask wall stability (Item 12)
-  wallCancellationRatio?: number; // Ratio of cancellations / spoofing (Item 12)
-  absorptionRate?: number; // Rate of aggressive volume absorbed at walls (Item 12)
-  spoofingSuspicion?: boolean; // Suspicion of fake spoof walls (Item 12)
-  liquidityMigration?: 'TOWARD_INSIDE' | 'TOWARD_OUTSIDE' | 'STABLE'; // Shift in liquidity depth (Item 12)
-  spreadChange?: number; // Dynamic spread variation (Item 12)
+  obiVelocity?: number | null; // Rate of change of OBI (Item 12)
+  obiAcceleration?: number | null; // Second derivative of OBI (Item 12)
+  bidWallPersistence?: number | null; // Milliseconds / Score of bid wall stability (Item 12)
+  askWallPersistence?: number | null; // Milliseconds / Score of ask wall stability (Item 12)
+  wallCancellationRatio?: number | null; // Ratio of cancellations / spoofing (Item 12)
+  absorptionRate?: number | null; // Rate of aggressive volume absorbed at walls (Item 12)
+  liquidityInflowUsd?: number | null;
+  liquidityWithdrawalUsd?: number | null;
+  spreadCompressionUsd?: number | null;
+  spreadExpansionUsd?: number | null;
+  spoofingSuspicion?: boolean | null; // Suspicion of fake spoof walls (Item 12)
+  wallCancellationObserved?: boolean | null;
+  liquidityMigration?: 'TOWARD_INSIDE' | 'TOWARD_OUTSIDE' | 'STABLE' | 'UNKNOWN'; // Shift in liquidity depth (Item 12)
+  spreadChange?: number | null; // Dynamic spread variation (Item 12)
   depthImbalanceByDistance?: { nearPct: number; midPct: number; farPct: number }; // Imbalance at distance tiers (Item 12)
   snapshotAgeMs?: number;
 }
 
 export interface OrderFlowFeatures {
-  cvdDelta: number; // Cumulative signed volume delta
+  cvdDelta: number | null; // Cumulative signed trade-level volume delta
+  cvdDeltaUsd?: number | null;
   cvdDivergence: string;
-  takerBuyVol: number; // Specific real taker buyer volume (Item 11)
-  takerSellVol: number; // Specific real taker seller volume (Item 11)
-  takerRatio: number; // takerBuy / (takerBuy + takerSell)
-  takerDelta: number; // takerBuy - takerSell
-  delta?: number; // Current period net delta (Item 11)
-  cumulativeDelta?: number; // Multi-period cumulative delta (Item 11)
-  deltaVelocity?: number; // Delta velocity (volume/sec) (Item 11)
+  takerBuyVol: number | null; // Specific real taker buyer volume (Item 11)
+  takerSellVol: number | null; // Specific real taker seller volume (Item 11)
+  takerRatio: number | null; // takerBuy / (takerBuy + takerSell)
+  takerDelta: number | null; // takerBuy - takerSell
+  tradePriceChangePct?: number | null;
+  delta?: number | null; // Current period net delta (Item 11)
+  cumulativeDelta?: number | null; // Multi-period cumulative delta (Item 11)
+  deltaVelocity?: number | null; // Delta velocity (volume/sec) (Item 11)
   isRealTradeFlow?: boolean; // True if from live trade feed, false if unavailable (Item 11)
   status?: FeedStatus; // LIVE / UNAVAILABLE (Item 11)
   timestampUtc?: number;
@@ -472,7 +482,7 @@ export interface TradeAuditTrail {
     ema50: number;
     ema200: number;
     obi: number;
-    cvdDelta?: number;
+    cvdDelta?: number | null;
     takerRatio?: number;
     fngVal: number;
     spreadUsd: number;
@@ -686,7 +696,7 @@ export interface AnalysisResult {
   oi: number;
   frNote: string;
   obi: number;
-  cvdDelta?: number;
+  cvdDelta?: number | null;
   cvdDivergence?: string;
   fundingSqueezeSignal?: string;
   forecastUp: number;
@@ -716,9 +726,9 @@ export interface AnalysisResult {
   realObiData?: RealOrderBookImbalance;
   orderFlowFeatures?: OrderFlowFeatures;
   canonicalSnapshot?: CanonicalMarketSnapshot;
-  takerBuyVol?: number;
-  takerSellVol?: number;
-  takerRatio?: number;
+  takerBuyVol?: number | null;
+  takerSellVol?: number | null;
+  takerRatio?: number | null;
   calibratedMetadata?: CalibratedProbabilityMetadata;
   decisionPipeline?: DecisionPipelineResult;
   liquidityMap?: LiquidityMapReport;
@@ -1125,6 +1135,7 @@ export interface SweepReversalSetup {
 // ۲۵. ماتریس واگرایی چندبعدی CVD / OI / Price / Funding / Liquidations
 // -------------------------------------------------------------
 export type DirectionState = 'UP' | 'DOWN' | 'FLAT';
+export type CvdDirectionState = DirectionState | 'UNKNOWN';
 export type FundingState = 'HIGH_POSITIVE' | 'NEUTRAL' | 'HIGH_NEGATIVE';
 export type LiquidationDominance = 'LONGS_DOMINANT' | 'SHORTS_DOMINANT' | 'BALANCED';
 
@@ -1140,7 +1151,7 @@ export type MatrixRegimeType =
 export interface CvdOiMatrixCell {
   dimensionName: string; // Price, CVD, OI, Funding, Liquidations
   valueText: string;
-  state: DirectionState | FundingState | LiquidationDominance;
+  state: DirectionState | CvdDirectionState | FundingState | LiquidationDominance;
   scoreContribution: number;
   isDivergent: boolean;
 }
@@ -1149,8 +1160,8 @@ export interface CvdOiMatrixReport {
   priceDirection: DirectionState;
   priceChangePct: number;
   
-  cvdDirection: DirectionState;
-  cvdDeltaUsd: number;
+  cvdDirection: CvdDirectionState;
+  cvdDeltaUsd: number | null;
   
   oiDirection: DirectionState;
   openInterestChangePct: number;

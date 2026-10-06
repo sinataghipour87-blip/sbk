@@ -38,43 +38,48 @@ export const WavePredictionEngineWidget: React.FC<Props> = ({ analysis, predicti
           </div>
         </div>
 
-        {/* 1. THREE UNMIXED PREDICTION METRICS (ITEM 12) */}
+        {/* 1. Four separately learned wave outcomes */}
         <div className="bg-[#020814] border border-indigo-900/60 rounded-xl p-3.5 space-y-2 font-mono text-xs">
           <div className="text-slate-300 font-sans font-bold text-xs flex items-center gap-1.5 border-b border-indigo-950 pb-2">
             <Target className="w-3.5 h-3.5 text-cyan-400" />
-            <span>خروجی‌های ۳گانه مجزای پیش‌بینی موج (Unmixed Predictions):</span>
+            <span>چهار خروجی مستقل مدل موج (Outcome-Based):</span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-            {/* Metric A: Continuation Score & Calibrated Probability */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2.5 pt-1">
             <div className="bg-[#040e21] p-2.5 rounded-lg border border-slate-800">
-              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">A) امتیاز شتاب ادامه (Score):</span>
-              <span className="text-sm font-black text-cyan-300">
-                {predictionMetrics.continuationScore !== null ? `${predictionMetrics.continuationScore}/100` : 'UNVALIDATED'}
-              </span>
-              <span className="text-[9px] text-slate-400 font-sans block mt-1">
-                احتمال کالیبره‌شده: {predictionMetrics.continuationProbabilityPct !== null ? `${predictionMetrics.continuationProbabilityPct}٪` : 'UNVALIDATED'}
-              </span>
+              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">۱) نرخ continuation تجربیِ موج هم‌کلاس:</span>
+              <span className="text-sm font-black text-cyan-300">{predictionMetrics.continuationProbabilityPct === null ? 'UNVALIDATED' : `${predictionMetrics.continuationProbabilityPct}٪`}</span>
             </div>
 
-            {/* Metric B: Expected Move Magnitude */}
             <div className="bg-[#040e21] p-2.5 rounded-lg border border-slate-800">
-              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">B) اندازه حرکت تخمینی:</span>
+              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">۲) حرکت باقیماندهٔ مورد انتظار:</span>
               <span className="text-sm font-black text-emerald-400">
-                {predictionMetrics.expectedMoveMagnitudeAtr} ATR <span className="text-xs font-normal">({predictionMetrics.expectedMoveMagnitudePct}٪)</span>
+                {predictionMetrics.expectedMoveMagnitudeAtr === null || predictionMetrics.expectedMoveMagnitudePct === null
+                  ? 'UNVALIDATED'
+                  : `${predictionMetrics.expectedMoveMagnitudeAtr} ATR (${predictionMetrics.expectedMoveMagnitudePct}٪)`}
               </span>
-              <span className="text-[9px] text-slate-400 font-sans block mt-1">تارگت بسط پله‌ای</span>
             </div>
 
-            {/* Metric C: Expected Duration */}
             <div className="bg-[#040e21] p-2.5 rounded-lg border border-slate-800">
-              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">C) زمان ماندگاری تخمینی:</span>
+              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">۳) مدت باقی‌ماندهٔ مورد انتظار:</span>
               <span className="text-sm font-black text-amber-300 flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-amber-400" />
-                <span>{predictionMetrics.expectedDurationMinutes} دقیقه</span>
+                <span>{predictionMetrics.expectedDurationMinutes === null ? 'UNVALIDATED' : `${predictionMetrics.expectedDurationMinutes} دقیقه`}</span>
               </span>
-              <span className="text-[9px] text-slate-400 font-sans block mt-1">افقزمانی حرکت</span>
             </div>
+
+            <div className="bg-[#040e21] p-2.5 rounded-lg border border-slate-800">
+              <span className="text-[10px] text-slate-400 font-sans block mb-0.5">۴) احتمال بازگشت:</span>
+              <span className="text-sm font-black text-rose-300">
+                {predictionMetrics.reversalProbabilityPct === null ? 'UNVALIDATED' : `${predictionMetrics.reversalProbabilityPct}٪`}
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-3 pt-2 text-[10px] text-slate-400">
+            <span>Outcome پس از Stage: 5m {predictionMetrics.outcomeProbabilityByHorizon['5m'] === null ? 'UNVALIDATED' : `${predictionMetrics.outcomeProbabilityByHorizon['5m']}٪`}</span>
+            <span>15m {predictionMetrics.outcomeProbabilityByHorizon['15m'] === null ? 'UNVALIDATED' : `${predictionMetrics.outcomeProbabilityByHorizon['15m']}٪`}</span>
+            <span>30m {predictionMetrics.outcomeProbabilityByHorizon['30m'] === null ? 'UNVALIDATED' : `${predictionMetrics.outcomeProbabilityByHorizon['30m']}٪`}</span>
+            <span>60m {predictionMetrics.outcomeProbabilityByHorizon['60m'] === null ? 'UNVALIDATED' : `${predictionMetrics.outcomeProbabilityByHorizon['60m']}٪`}</span>
           </div>
         </div>
 

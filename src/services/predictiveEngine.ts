@@ -6,6 +6,11 @@ import {
   evaluateRealLearnedSegmentMetrics,
   extractCurrentPredictionFeatures,
 } from './centralProbabilityEngine';
+import {
+  getWaveOutcomeMetrics,
+  recordWaveObservationAndClassify,
+  WaveStageClassification,
+} from './waveOutcomeDataset';
 
 export interface EntryValidationResult {
   shouldEnter: boolean;
@@ -1313,18 +1318,18 @@ export function calculateGarchMacroConfidenceWeight(
 // برای پیش‌بینی دقیق‌تر، آمادگی ۱۰۰٪ و هماهنگی کامل با تریلینگ استاپ شناور
 // =========================================================================
 export interface DynamicScenarioMatrixState {
-  primaryScenario: 'ALPHA_IMPULSE' | 'LIQUIDITY_SWEEP' | 'VOLATILITY_SQUEEZE';
-  scenarioConfidencePct: number;
+  primaryScenario: 'UNCLASSIFIED' | 'ALPHA_IMPULSE' | 'LIQUIDITY_SWEEP' | 'VOLATILITY_SQUEEZE';
+  scenarioConfidencePct: number | null;
   technicalScore: number;
-  confidenceScore: number;
+  confidenceScore: number | null;
   consensusScore: number;
   calibratedProbabilityPct: number | null;
-  longProbabilityPct: number;
-  shortProbabilityPct: number;
-  rangeProbabilityPct: number;
-  activeStrategyType: 'TREND_RIDER' | 'SNIPER_COUNTER' | 'MICRO_SCALP';
-  adaptiveTrailingOffsetPct: number; // درصد فاصله تریلینگ استاپ شناور
-  nextScenarioTriggerPrice: number; // قیمت آستانه سوییچ به سناریوی جایگزین
+  longProbabilityPct: number | null;
+  shortProbabilityPct: number | null;
+  rangeProbabilityPct: number | null;
+  activeStrategyType: 'WAIT_CONFIRMATION' | 'TREND_RIDER' | 'SNIPER_COUNTER' | 'MICRO_SCALP';
+  adaptiveTrailingOffsetPct: number | null;
+  nextScenarioTriggerPrice: number | null;
   scenarioPlanFa: string;
 }
 
@@ -1332,16 +1337,25 @@ export function evaluateDynamicScenarioMatrix(
   analysis: Partial<AnalysisResult> | any,
   aiPrediction: any
 ): DynamicScenarioMatrixState {
-  const price = analysis?.price || 88450;
-  const reversalThreat = aiPrediction?.reversal30m?.reversalProbability ?? (analysis?.rsi > 70 ? 45 : 20);
-  const continuationProb = aiPrediction?.reversal30m?.continuationProbability ?? (analysis?.adx > 25 ? 65 : 45);
+  const price = typeof analysis?.price === 'number' && Number.isFinite(analysis.price) ? analysis.price : null;
+  const reversalThreat = typeof aiPrediction?.reversal30m?.reversalProbability === 'number' &&
+    Number.isFinite(aiPrediction.reversal30m.reversalProbability)
+    ? aiPrediction.reversal30m.reversalProbability
+    : null;
+  const continuationProb = typeof aiPrediction?.reversal30m?.continuationProbability === 'number' &&
+    Number.isFinite(aiPrediction.reversal30m.continuationProbability)
+    ? aiPrediction.reversal30m.continuationProbability
+    : null;
   const isTrap = aiPrediction?.whaleTrap?.isTrapDetected ?? false;
-  const volPct = analysis?.volatilityPct ?? 1.4;
-  const obi = analysis?.obi ?? 0;
+  const obi = analysis?.realObiData?.status === 'LIVE' &&
+    typeof analysis.realObiData.obi === 'number' &&
+    (analysis.realObiData.snapshotAgeMs ?? analysis.realObiData.ageMs) <= 10000
+    ? analysis.realObiData.obi
+    : null;
 
   // سناریو ۱: بریک‌اوت و شتاب صعودی/نزولی موج آلفا
-  if (continuationProb >= 60 && reversalThreat < 40 && !isTrap) {
-    const isLong = analysis?.direction === 'LONG';
+  if (continuationProb !== null && continuationProb >= 60 &&
+    reversalThreat !== null && reversalThreat < 40 && !isTrap && price !== null) {
     return {
       primaryScenario: 'ALPHA_IMPULSE',
       scenarioConfidencePct: Math.min(95, Math.round(continuationProb)),
@@ -1349,9 +1363,9 @@ export function evaluateDynamicScenarioMatrix(
       confidenceScore: Math.min(90, Math.round(continuationProb)),
       consensusScore: 82,
       calibratedProbabilityPct: aiPrediction?.calibratedWinProb ?? null,
-      longProbabilityPct: isLong ? 70 : 15,
-      shortProbabilityPct: !isLong ? 70 : 15,
-      rangeProbabilityPct: 15,
+      longProbabilityPct: null,
+      shortProbabilityPct: null,
+      rangeProbabilityPct: null,
       activeStrategyType: 'TREND_RIDER',
       adaptiveTrailingOffsetPct: 0.85, // فضای تنفس استاندارد برای موج‌سواری کامل روی امواج بزرگ
       nextScenarioTriggerPrice: isLong ? Math.round(price * 0.994) : Math.round(price * 1.006),
@@ -1360,39 +1374,42 @@ export function evaluateDynamicScenarioMatrix(
   }
 
   // سناریو ۲: شکار نقدینگی و پولبک عمیق نهنگ‌ها (Liquidity Sweep)
-  if (isTrap || reversalThreat >= 50 || Math.abs(obi) > 0.18) {
+  if (isTrap || (reversalThreat !== null && reversalThreat >= 50) || (obi !== null && Math.abs(obi) > 0.18)) {
+    const scenarioConfidencePct = reversalThreat === null ? null : Math.min(90, Math.round(reversalThreat + 15));
     return {
       primaryScenario: 'LIQUIDITY_SWEEP',
-      scenarioConfidencePct: Math.min(90, Math.round(reversalThreat + 15)),
+      scenarioConfidencePct,
       technicalScore: 80,
-      confidenceScore: Math.min(85, Math.round(reversalThreat + 10)),
+      confidenceScore: reversalThreat === null ? null : Math.min(85, Math.round(reversalThreat + 10)),
       consensusScore: 84,
       calibratedProbabilityPct: aiPrediction?.calibratedWinProb ?? null,
-      longProbabilityPct: 35,
-      shortProbabilityPct: 35,
-      rangeProbabilityPct: 30,
-      activeStrategyType: 'SNIPER_COUNTER',
-      adaptiveTrailingOffsetPct: 0.65, // استاپ اسنایپ متناسب با رژیم نوسان
-      nextScenarioTriggerPrice: analysis?.direction === 'LONG' ? Math.round(price * 0.988) : Math.round(price * 1.012),
+      longProbabilityPct: null,
+      shortProbabilityPct: null,
+      rangeProbabilityPct: null,
+      activeStrategyType: reversalThreat !== null && reversalThreat >= 50 && price !== null
+        ? 'SNIPER_COUNTER'
+        : 'WAIT_CONFIRMATION',
+      adaptiveTrailingOffsetPct: null,
+      nextScenarioTriggerPrice: null,
       scenarioPlanFa: 'شناسایی تله نقدینگی نهنگ‌ها؛ سوییچ به استراتژی Sniper-Counter، ورود لیمیت در لبه شدو و قفل مطمئن سود.'
     };
   }
 
   // سناریو ۳: فشردگی رنج فنری و نوسان فشرده
   return {
-    primaryScenario: 'VOLATILITY_SQUEEZE',
-    scenarioConfidencePct: 65,
-    technicalScore: 60,
-    confidenceScore: 62,
-    consensusScore: 65,
-    calibratedProbabilityPct: aiPrediction?.calibratedWinProb ?? null,
-    longProbabilityPct: 33,
-    shortProbabilityPct: 33,
-    rangeProbabilityPct: 34,
-    activeStrategyType: 'MICRO_SCALP',
-    adaptiveTrailingOffsetPct: 0.55,
-    nextScenarioTriggerPrice: Math.round(price * 1.008),
-    scenarioPlanFa: 'فشردگی نوسانات قبل از حرکت اصلی؛ اجرای اسکالپ میکرو دوطرفه در کف و سقف کانال با خروج‌های پله‌ای استاندارد.'
+    primaryScenario: 'UNCLASSIFIED',
+    scenarioConfidencePct: null,
+    technicalScore: 0,
+    confidenceScore: null,
+    consensusScore: 0,
+    calibratedProbabilityPct: null,
+    longProbabilityPct: null,
+    shortProbabilityPct: null,
+    rangeProbabilityPct: null,
+    activeStrategyType: 'WAIT_CONFIRMATION',
+    adaptiveTrailingOffsetPct: null,
+    nextScenarioTriggerPrice: null,
+    scenarioPlanFa: `سناریو UNCLASSIFIED است؛ احتمال ادامه ${continuationProb === null ? 'UNKNOWN' : `${continuationProb}٪`} و احتمال بازگشت ${reversalThreat === null ? 'UNKNOWN' : `${reversalThreat}٪`} است.`
   };
 }
 
@@ -1404,31 +1421,31 @@ export function evaluateDynamicScenarioMatrix(
 export interface QuantumProcessingBrainResult {
   fractalPatternBrain: {
     matchedPatternName: string;
-    similarityDegreePct: number;
-    forecastVector30m: number; // قیمت پیش‌بینی‌شده برای ۳۰m
-    bias: 'BULLISH_CONTINUATION' | 'BEARISH_CONTINUATION' | 'REVERSAL_SWEEP';
+    similarityDegreePct: number | null;
+    forecastVector30m: number | null;
+    bias: 'BULLISH_CONTINUATION' | 'BEARISH_CONTINUATION' | 'REVERSAL_SWEEP' | 'UNCLASSIFIED';
   };
   liquidityObiBrain: {
-    whaleAggressionScore: number; // ۰ تا ۱۰۰
-    wallDistanceUsd: number;
-    recommendedSniperEntry: number;
+    whaleAggressionScore: number | null;
+    wallDistanceUsd: number | null;
+    recommendedSniperEntry: number | null;
     isLiquidityTrapDetected: boolean;
   };
   garchVolatilityBrain: {
-    regime: 'COMPRESSION' | 'EXPANSION' | 'SPIKE_TURBULENCE';
-    adaptiveTrailingOffsetPct: number;
-    recommendedStopLossPct: number;
-    zeroLossFeeSafeThreshold: number; // درصد سود برای قفل استاپ روی Breakeven + Fee
+    regime: 'COMPRESSION' | 'EXPANSION' | 'SPIKE_TURBULENCE' | 'UNKNOWN';
+    adaptiveTrailingOffsetPct: number | null;
+    recommendedStopLossPct: number | null;
+    zeroLossFeeSafeThreshold: number | null;
   };
   cognitiveDecisionBrain: {
     masterSignalGrade: 'DIAMOND_PRIME' | 'GOLD_CONVICTION' | 'TACTICAL_SCALP' | 'BLOCKED_NOISE';
     executionAction: 'OPEN_FULL' | 'SCALE_IN_3_STEPS' | 'SNIPER_LIMIT' | 'WAIT_CONFIRMATION';
     maxLeverageCap: number;
-    technicalScore: number;
-    confidenceScore: number;
-    consensusScore: number;
+    technicalScore: number | null;
+    confidenceScore: number | null;
+    consensusScore: number | null;
     calibratedProbabilityPct: number | null;
-    projectedWinRatePct: number;
+    projectedWinRatePct: number | null;
     summaryGuidanceFa: string;
   };
 }
@@ -1438,67 +1455,95 @@ export function runQuantumProcessingBrain(
   aiPrediction: any,
   currentPrice: number
 ): QuantumProcessingBrainResult {
-  const p = currentPrice || analysis?.price || 88450;
-  const obi = analysis?.obi ?? 0;
-  const volPct = analysis?.volatilityPct ?? 1.4;
-  const reversalProb = aiPrediction?.reversal30m?.reversalProbability ?? (analysis?.rsi > 70 ? 45 : 20);
-  const continuationProb = aiPrediction?.reversal30m?.continuationProbability ?? (analysis?.adx > 25 ? 65 : 45);
-  const dir = analysis?.direction === 'SHORT' ? 'SHORT' : 'LONG';
+  const p = Number.isFinite(currentPrice) && currentPrice > 0
+    ? currentPrice
+    : typeof analysis?.price === 'number' && Number.isFinite(analysis.price) && analysis.price > 0
+      ? analysis.price
+      : null;
+  const obi = analysis?.realObiData?.status === 'LIVE' &&
+    typeof analysis.realObiData.obi === 'number' &&
+    Number.isFinite(analysis.realObiData.obi) &&
+    (analysis.realObiData.snapshotAgeMs ?? analysis.realObiData.ageMs) <= 10000
+    ? analysis.realObiData.obi
+    : null;
+  const volPct = typeof analysis?.volatilityPct === 'number' && Number.isFinite(analysis.volatilityPct)
+    ? analysis.volatilityPct
+    : null;
+  const reversalProb = typeof aiPrediction?.reversal30m?.reversalProbability === 'number' &&
+    Number.isFinite(aiPrediction.reversal30m.reversalProbability)
+    ? aiPrediction.reversal30m.reversalProbability
+    : null;
+  const continuationProb = typeof aiPrediction?.reversal30m?.continuationProbability === 'number' &&
+    Number.isFinite(aiPrediction.reversal30m.continuationProbability)
+    ? aiPrediction.reversal30m.continuationProbability
+    : null;
+  const dir = analysis?.direction === 'SHORT' ? 'SHORT' : analysis?.direction === 'LONG' ? 'LONG' : null;
 
   // ۱. مغز پردازش الگوهای فرکتالی (Fractal Pattern Brain)
-  const isReversalThreat = reversalProb >= 50;
-  const patternName = isReversalThreat ? 'چرخش فرکتالی لبه V-Shape' : 'ادامه‌دهنده صعودی/نزولی الگوریتم مارکوف';
-  const similarityDegreePct = Math.min(95, Math.round(70 + Math.abs(obi) * 30 + (isReversalThreat ? 10 : 0)));
-  const forecastDeltaPct = isReversalThreat
-    ? (dir === 'LONG' ? -0.007 : 0.007)
-    : (dir === 'LONG' ? 0.012 : -0.012);
-  const forecastVector30m = Math.round(p * (1 + forecastDeltaPct) * 100) / 100;
+  const isReversalThreat = reversalProb !== null && reversalProb >= 50;
+  const isContinuationConfirmed = continuationProb !== null && continuationProb >= 50;
+  const hasWaveClassification = isReversalThreat || isContinuationConfirmed;
+  const patternName = isReversalThreat
+    ? 'چرخش فرکتالی لبه V-Shape'
+    : isContinuationConfirmed
+      ? 'ادامه موج بر اساس احتمال معتبر'
+      : 'UNCLASSIFIED';
+  const similarityDegreePct = hasWaveClassification && obi !== null
+    ? Math.min(95, Math.round(70 + Math.abs(obi) * 30 + (isReversalThreat ? 10 : 0)))
+    : null;
+  const forecastVector30m = null;
 
   // ۲. مغز پردازش نقدینگی و عمق دفتر سفارشات نهنگ‌ها (Liquidity & OBI Brain)
-  const whaleAggression = Math.min(100, Math.round(Math.abs(obi) * 350 + (analysis?.volumeUsd ? 20 : 40)));
-  const wallDistanceUsd = Math.round(p * 0.004);
-  const isTrap = whaleAggression > 80 && isReversalThreat;
+  const whaleAggression = obi === null || typeof analysis?.volumeUsd !== 'number' || !Number.isFinite(analysis.volumeUsd)
+    ? null
+    : Math.min(100, Math.round(Math.abs(obi) * 350 + 20));
+  const wallDistanceUsd = p === null ? null : Math.round(p * 0.004);
+  const isTrap = whaleAggression !== null && whaleAggression > 80 && isReversalThreat;
   const sniperOffset = isTrap ? 0.0035 : 0.0018;
-  const recommendedSniperEntry = dir === 'LONG'
-    ? Math.round((p * (1 - sniperOffset)) * 100) / 100
-    : Math.round((p * (1 + sniperOffset)) * 100) / 100;
+  const recommendedSniperEntry = p === null || dir === null
+    ? null
+    : Math.round((p * (dir === 'LONG' ? (1 - sniperOffset) : (1 + sniperOffset))) * 100) / 100;
 
   // ۳. مغز پردازش نوسانات GARCH و تنظیم تریلینگ شناور (GARCH Volatility Brain)
-  let regime: QuantumProcessingBrainResult['garchVolatilityBrain']['regime'] = 'EXPANSION';
-  let adaptiveTrailingOffsetPct = 0.40;
-  let recommendedStopLossPct = 0.35;
+  let regime: QuantumProcessingBrainResult['garchVolatilityBrain']['regime'] = 'UNKNOWN';
+  let adaptiveTrailingOffsetPct: number | null = null;
+  let recommendedStopLossPct: number | null = null;
 
-  if (volPct > 3.2) {
+  if (volPct !== null && volPct > 3.2) {
     regime = 'SPIKE_TURBULENCE';
-    adaptiveTrailingOffsetPct = 0.25; // تریلینگ بسیار فشرده در نوسانات شدید
+    adaptiveTrailingOffsetPct = 0.25;
     recommendedStopLossPct = 0.28;
-  } else if (volPct < 0.9) {
+  } else if (volPct !== null && volPct < 0.9) {
     regime = 'COMPRESSION';
     adaptiveTrailingOffsetPct = 0.30;
     recommendedStopLossPct = 0.25;
-  } else {
+  } else if (volPct !== null && dir !== null) {
+    regime = 'EXPANSION';
     adaptiveTrailingOffsetPct = dir === 'LONG' ? 0.42 : 0.38;
+    recommendedStopLossPct = 0.35;
   }
 
   // حد آستانه قفل ریسک‌فری با بافر کارمزد (Breakeven + 0.05% Fee Buffer)
-  const zeroLossFeeSafeThreshold = 0.30;
+  const zeroLossFeeSafeThreshold = volPct === null ? null : 0.30;
 
   // ۴. مغز تصمیم‌گیری شناختی کلان (Cognitive Decision Brain)
-  let masterGrade: QuantumProcessingBrainResult['cognitiveDecisionBrain']['masterSignalGrade'] = 'GOLD_CONVICTION';
-  let execAction: QuantumProcessingBrainResult['cognitiveDecisionBrain']['executionAction'] = 'OPEN_FULL';
-  let maxLev = 20;
-  let techScore = 75;
-  let confScore = 70;
-  let consScore = 74;
+  let masterGrade: QuantumProcessingBrainResult['cognitiveDecisionBrain']['masterSignalGrade'] = 'BLOCKED_NOISE';
+  let execAction: QuantumProcessingBrainResult['cognitiveDecisionBrain']['executionAction'] = 'WAIT_CONFIRMATION';
+  let maxLev = 0;
+  let techScore: number | null = null;
+  let confScore: number | null = null;
+  let consScore: number | null = null;
 
-  if (similarityDegreePct >= 85 && whaleAggression > 50 && regime !== 'SPIKE_TURBULENCE') {
+  if (similarityDegreePct !== null && similarityDegreePct >= 85 &&
+    whaleAggression !== null && whaleAggression > 50 &&
+    regime !== 'SPIKE_TURBULENCE' && regime !== 'UNKNOWN') {
     masterGrade = 'DIAMOND_PRIME';
     execAction = 'SCALE_IN_3_STEPS'; // پله‌ای ۳ مرحله‌ای برای سود تصاعدی
     maxLev = 30;
     techScore = 88;
     confScore = 85;
     consScore = 86;
-  } else if (isTrap || regime === 'SPIKE_TURBULENCE') {
+  } else if (hasWaveClassification && (isTrap || regime === 'SPIKE_TURBULENCE')) {
     masterGrade = 'TACTICAL_SCALP';
     execAction = 'SNIPER_LIMIT';
     maxLev = 12;
@@ -1507,7 +1552,9 @@ export function runQuantumProcessingBrain(
     consScore = 64;
   }
 
-  const summaryGuidanceFa = `🧠 تحلیل مغزهای ۴گانه: درجه سیگنال [${masterGrade}] | پیش‌بینی ۳۰ دقیقه روی $${forecastVector30m.toLocaleString()} | قفل ریسک‌فری در سود +${zeroLossFeeSafeThreshold}٪ با تریلینگ شناور ${adaptiveTrailingOffsetPct}٪.`;
+  const summaryGuidanceFa = hasWaveClassification && forecastVector30m !== null
+    ? `🧠 تحلیل مغزهای ۴گانه: درجه سیگنال [${masterGrade}] | پیش‌بینی ۳۰ دقیقه روی $${forecastVector30m.toLocaleString()}.`
+    : '🧠 خروجی موج UNVALIDATED است؛ تا دریافت احتمال معتبر و داده کافی، پیش‌بینی و اقدام اجرایی صادر نمی‌شود.';
 
   // محاسبه احتمال کالیبره‌شده واقعی از تاریخچه بدون اعداد فیک
   let calibratedProb: number | null = null;
@@ -1530,7 +1577,13 @@ export function runQuantumProcessingBrain(
       matchedPatternName: patternName,
       similarityDegreePct,
       forecastVector30m,
-      bias: isReversalThreat ? 'REVERSAL_SWEEP' : (dir === 'LONG' ? 'BULLISH_CONTINUATION' : 'BEARISH_CONTINUATION')
+      bias: isReversalThreat
+        ? 'REVERSAL_SWEEP'
+        : isContinuationConfirmed && dir === 'LONG'
+          ? 'BULLISH_CONTINUATION'
+          : isContinuationConfirmed && dir === 'SHORT'
+            ? 'BEARISH_CONTINUATION'
+            : 'UNCLASSIFIED'
     },
     liquidityObiBrain: {
       whaleAggressionScore: whaleAggression,
@@ -1552,7 +1605,7 @@ export function runQuantumProcessingBrain(
       confidenceScore: confScore,
       consensusScore: consScore,
       calibratedProbabilityPct: calibratedProb,
-      projectedWinRatePct: calibratedProb ?? confScore,
+      projectedWinRatePct: calibratedProb,
       summaryGuidanceFa
     }
   };
@@ -2028,11 +2081,11 @@ export function generateClientSideTimeTravelFallback(currentPrice = 88450, trend
 // =========================================================================
 
 export interface ParallelRealtimeCalibrationResult {
-  realtimeVolatilityIndex: number; // نوسان‌سنج زنده
+  realtimeVolatilityIndex: number | null;
   adaptiveSmoothingAlpha: number;  // ضریب هموارسازی انطباقی
-  calibratedConfidenceWeight: number; // وزن کالیبره‌شده اطمینان
-  calibratedTrailingOffsetPct: number; // فاصله تریلینگ شناور کالیبره‌شده
-  calibratedStopLossPct: number; // حد ضرر کالیبره‌شده
+  calibratedConfidenceWeight: number | null;
+  calibratedTrailingOffsetPct: number | null;
+  calibratedStopLossPct: number | null;
   noiseFilterActive: boolean; // فعال بودن فیلتر نویز بلادرنگ
   calibrationStatusFa: string;
 }
@@ -2041,14 +2094,26 @@ export function runParallelRealtimeCalibration(
   analysis: Partial<AnalysisResult> | any,
   quantumBrain: QuantumProcessingBrainResult
 ): ParallelRealtimeCalibrationResult {
-  const price = analysis?.price || 88450;
-  const volPct = analysis?.volatilityPct ?? 1.4;
-  const atr = analysis?.atr ?? (price * 0.008);
-  const obi = Math.abs(analysis?.obi ?? 0);
+  const price = typeof analysis?.price === 'number' && Number.isFinite(analysis.price) && analysis.price > 0
+    ? analysis.price
+    : null;
+  const volPct = typeof analysis?.volatilityPct === 'number' && Number.isFinite(analysis.volatilityPct)
+    ? analysis.volatilityPct
+    : null;
+  const atr = typeof analysis?.atr === 'number' && Number.isFinite(analysis.atr) && analysis.atr > 0
+    ? analysis.atr
+    : null;
+  const obi = analysis?.realObiData?.status === 'LIVE' &&
+    typeof analysis.realObiData.obi === 'number' &&
+    Number.isFinite(analysis.realObiData.obi) &&
+    (analysis.realObiData.snapshotAgeMs ?? analysis.realObiData.ageMs) <= 10000
+    ? Math.abs(analysis.realObiData.obi)
+    : null;
 
   // ۱. محاسبه شاخص نوسان‌سنج بلادرنگ (Realtime Volatility Index - RVI)
-  const atrRatio = (atr / price) * 100;
-  const realtimeVolatilityIndex = Math.round((volPct * 0.6 + atrRatio * 0.4) * 100) / 100;
+  const realtimeVolatilityIndex = price !== null && volPct !== null && atr !== null
+    ? Math.round((volPct * 0.6 + (atr / price) * 40) * 100) / 100
+    : null;
 
   // ۲. کالیبراسیون موازی ضریب هموارسازی (Adaptive Alpha Calibration)
   // در شرایط تلاطم، آلفا افزایش می‌یابد تا واکنش به تغییرات قیمت آنی شود
@@ -2057,13 +2122,13 @@ export function runParallelRealtimeCalibration(
   let calibratedStopLossPct = quantumBrain.garchVolatilityBrain.recommendedStopLossPct;
   let noiseFilterActive = false;
 
-  if (realtimeVolatilityIndex > 2.8) {
+  if (realtimeVolatilityIndex !== null && realtimeVolatilityIndex > 2.8) {
     // تلاطم شدید بازار (High Volatility Turbulence)
     adaptiveSmoothingAlpha = 0.45;
     calibratedTrailingOffsetPct = Math.min(0.25, calibratedTrailingOffsetPct * 0.75); // فشرده‌سازی استاپ برای صید سریع سود
     calibratedStopLossPct = Math.max(0.22, calibratedStopLossPct * 0.80);
     noiseFilterActive = true;
-  } else if (realtimeVolatilityIndex < 0.8) {
+  } else if (realtimeVolatilityIndex !== null && realtimeVolatilityIndex < 0.8) {
     // نوسانات خرد و بازار کم‌رمق
     adaptiveSmoothingAlpha = 0.10;
     calibratedTrailingOffsetPct = 0.35;
@@ -2072,11 +2137,15 @@ export function runParallelRealtimeCalibration(
 
   // ۳. محاسبه وزن کالیبره‌شده اطمینان
   const baseWinRate = quantumBrain.cognitiveDecisionBrain.projectedWinRatePct;
-  const obiBonus = obi > 0.12 ? 3 : 0;
+  const obiBonus = obi !== null && obi > 0.12 ? 3 : 0;
   const noisePenalty = noiseFilterActive ? -2 : 0;
-  const calibratedConfidenceWeight = Math.min(98, Math.max(68, baseWinRate + obiBonus + noisePenalty));
+  const calibratedConfidenceWeight = baseWinRate === null
+    ? null
+    : Math.min(100, Math.max(0, baseWinRate + obiBonus + noisePenalty));
 
-  const calibrationStatusFa = `⚡ کالیبراسیون بلادرنگ: شاخص نوسان RVI=${realtimeVolatilityIndex}٪ | ضریب واکنش Alpha=${adaptiveSmoothingAlpha} | استاپ شناور کالیبره‌شده=${calibratedTrailingOffsetPct}٪.`;
+  const calibrationStatusFa = realtimeVolatilityIndex === null
+    ? '⚡ کالیبراسیون UNVALIDATED است؛ قیمت، نوسان یا ATR معتبر در دسترس نیست.'
+    : `⚡ کالیبراسیون بلادرنگ: شاخص نوسان RVI=${realtimeVolatilityIndex}٪ | ضریب واکنش Alpha=${adaptiveSmoothingAlpha} | استاپ شناور کالیبره‌شده=${calibratedTrailingOffsetPct ?? 'UNKNOWN'}٪.`;
 
   return {
     realtimeVolatilityIndex,
@@ -2465,10 +2534,13 @@ export function calculateAiMtfConsensusCorrelation(
 // =========================================================================
 
 export type WaveStage =
+  | 'UNCLASSIFIED'
+  | 'WAVE_FORMING'
   | 'ACCUMULATION'
   | 'LIQUIDITY_SWEEP'
   | 'BREAKOUT'
   | 'EARLY_EXPANSION'
+  | 'EARLY_ACCELERATION'
   | 'TREND_EXPANSION'
   | 'MATURE_TREND'
   | 'EXHAUSTION'
@@ -2485,11 +2557,13 @@ export interface WaveStageDetails {
 }
 
 export interface WavePredictionMetrics {
-  continuationScore: number | null;
-  continuationProbabilityPct: number | null; // Calibrated empirical probability exclusively, or null
-  expectedMoveMagnitudeAtr: number;   // B: Expected move magnitude in ATR multiples
-  expectedMoveMagnitudePct: number;   // Expected move in %
-  expectedDurationMinutes: number;    // C: Expected duration in minutes
+  continuationScore: number | null; // Legacy alias of the empirical continuation rate; never a heuristic
+  continuationProbabilityPct: number | null; // Realized same-stage rate; null until its independent sample is sufficient
+  expectedMoveMagnitudeAtr: number | null;   // Expected remaining move from same-wave observations
+  expectedMoveMagnitudePct: number | null;
+  expectedDurationMinutes: number | null;
+  reversalProbabilityPct: number | null;
+  outcomeProbabilityByHorizon: Record<'5m' | '15m' | '30m' | '60m', number | null>;
   summaryTextFa: string;
 }
 
@@ -2572,62 +2646,38 @@ export interface WaveEngineFullResult {
 }
 
 /**
-/**
-  * ITEM 9 & 10: Rigorous OOS-Calibrated Wave Stage & Wave Prediction Engine
+  * Outcome-labeled Wave Stage Classifier and Wave Prediction Engine.
   */
- export function classifyMarketWaveStage(analysis: Partial<AnalysisResult> | any, aiPrediction?: any): WaveStageDetails {
-   const price = analysis?.price || 88450;
-   const vwap = analysis?.vwap || price;
-   const rsi = analysis?.rsi ?? 52;
-   const adx = analysis?.adx ?? 22;
-   const regime = analysis?.marketRegime || 'TREND';
- 
-   const direction = analysis?.direction === 'SHORT' ? 'SHORT' : 'LONG';
-   const features = getSnapshotFeatureVector(analysis, direction, price);
-   const metrics15m = evaluateRealLearnedSegmentMetrics('WAVE_STAGE_EVAL', regime, '15m', features, direction);
-   const isCalibrated = metrics15m.calibrationStatus === 'CALIBRATED';
- 
-   let currentStage: WaveStage = 'EARLY_EXPANSION';
-   let stageConfidencePct = isCalibrated && metrics15m.calibratedWinProbability !== null
-     ? Math.round(metrics15m.calibratedWinProbability * 100)
-     : null;
-   let stageNameFa = 'آغاز گام انبساطی (EARLY_EXPANSION)';
-   let stageDescriptionFa = stageConfidencePct !== null
-     ? 'احتمال مرحله با مدل مبتنی بر Snapshot و داده مستقل OOS برآورد شده است.'
-     : 'مرحله ساختاری از ویژگی‌های Snapshot جاری تشخیص داده شد؛ مدل احتمالاتی معتبر در دسترس نیست.';
-   let isTradeableStage = true;
- 
-   const distVwapPct = Math.abs((price - vwap) / vwap) * 100;
- 
-   if (adx > 45 || rsi > 78 || rsi < 22) {
-     currentStage = 'EXHAUSTION';
-     stageNameFa = 'اشباع و فرسودگی موج (EXHAUSTION)';
-     stageDescriptionFa = 'شتاب حرکت کاهش یافته و احتمال اصلاح یا بازگشت بالاست.';
-     isTradeableStage = false;
-   } else if (adx > 35) {
-     currentStage = 'TREND_EXPANSION';
-     stageNameFa = 'انبساط و شتاب روند (TREND_EXPANSION)';
-     stageDescriptionFa = 'موج در فاز شتاب اصلی همراه با حمایت سفارشات اگرسیو قرار دارد.';
-     isTradeableStage = true;
-   } else if (adx < 20) {
-     currentStage = 'ACCUMULATION';
-     stageNameFa = 'فاز انباشت و شکل‌گیری موج (ACCUMULATION)';
-     stageDescriptionFa = 'موج در حال ساختاردهی اولیه و تراکم است.';
-     isTradeableStage = true;
-   } else {
-     currentStage = 'EARLY_EXPANSION';
-     stageNameFa = 'آغاز گام انبساطی (EARLY_EXPANSION)';
-     stageDescriptionFa = 'نقطه ورود بهینه با لبه آماری تاییدشده در متقاطع ۵م تا ۶۰م.';
-     isTradeableStage = true;
-   }
- 
+ export function classifyMarketWaveStage(analysis: Partial<AnalysisResult> | any, _aiPrediction?: any): WaveStageDetails {
+   const classification: WaveStageClassification = recordWaveObservationAndClassify(analysis);
+   const stage = classification.stage;
+   const stageNameFa: Record<WaveStage, string> = {
+     UNCLASSIFIED: 'مرحله موج طبقه‌بندی‌نشده (UNCLASSIFIED)',
+     WAVE_FORMING: 'شکل‌گیری موج (WAVE_FORMING)',
+     ACCUMULATION: 'انباشت (ACCUMULATION)',
+     LIQUIDITY_SWEEP: 'جاروب نقدینگی (LIQUIDITY_SWEEP)',
+     BREAKOUT: 'شکست ساختار (BREAKOUT)',
+     EARLY_EXPANSION: 'انبساط اولیه (EARLY_EXPANSION)',
+     EARLY_ACCELERATION: 'شتاب اولیه (EARLY_ACCELERATION)',
+     TREND_EXPANSION: 'گسترش روند (TREND_EXPANSION)',
+     MATURE_TREND: 'روند بالغ (MATURE_TREND)',
+     EXHAUSTION: 'فرسودگی موج (EXHAUSTION)',
+     DISTRIBUTION: 'توزیع (DISTRIBUTION)',
+     REVERSAL: 'بازگشت (REVERSAL)',
+   };
+   const isTradeableStage = stage === 'WAVE_FORMING' ||
+     stage === 'EARLY_ACCELERATION' ||
+     stage === 'TREND_EXPANSION';
+
    return {
-     currentStage,
-     stageNameFa,
-     stageDescriptionFa,
-     stageConfidencePct,
+     currentStage: stage,
+     stageNameFa: stageNameFa[stage],
+     stageDescriptionFa: stage === 'UNCLASSIFIED'
+       ? `مدل outcome-based هنوز نمونهٔ کافی برای هر کلاس ندارد (${classification.sampleCount} نمونهٔ حل‌شده؛ حداقل ${20} برای هر کلاس).`
+       : `طبقه‌بندی KNN از ویژگی‌های زنده و پیامدهای واقعی 60m؛ نمونه‌ها: ${classification.sampleCountByStage[stage]}.`,
+     stageConfidencePct: classification.confidencePct,
      isTradeableStage,
-     stageAgeCandles: Math.min(15, Math.max(1, Math.round(distVwapPct * 6)))
+     stageAgeCandles: 0
    };
  }
  
@@ -2635,28 +2685,32 @@ export interface WaveEngineFullResult {
    stageDetails: WaveStageDetails,
    analysis: Partial<AnalysisResult> | any
  ): WavePredictionMetrics {
-   const regime = analysis?.marketRegime || 'TREND';
-   const atr = analysis?.atr || 500;
-   const price = analysis?.price || 88450;
-   const atrPct = (atr / price) * 100;
- 
-   const direction = analysis?.direction === 'SHORT' ? 'SHORT' : 'LONG';
-   const features = getSnapshotFeatureVector(analysis, direction, price);
-   const segment15 = evaluateRealLearnedSegmentMetrics('WAVE_CONTINUATION', regime, '15m', features, direction);
-   const segment30 = evaluateRealLearnedSegmentMetrics('WAVE_CONTINUATION', regime, '30m', features, direction);
- 
-   const continuationProbabilityPct: number | null = segment15.calibratedWinProbability !== null
-     ? Math.round(segment15.calibratedWinProbability * 100)
-     : (segment30.calibratedWinProbability !== null ? Math.round(segment30.calibratedWinProbability * 100) : null);
- 
+   const atr = analysis?.atr;
+   const price = analysis?.price;
+   const stage = stageDetails.currentStage === 'WAVE_FORMING' ||
+     stageDetails.currentStage === 'EARLY_ACCELERATION' ||
+     stageDetails.currentStage === 'TREND_EXPANSION' ||
+     stageDetails.currentStage === 'MATURE_TREND' ||
+     stageDetails.currentStage === 'EXHAUSTION'
+     ? stageDetails.currentStage
+     : 'UNCLASSIFIED';
+   const outcomes = getWaveOutcomeMetrics(analysis, stage);
+   const atrPct = typeof atr === 'number' && atr > 0 && typeof price === 'number' && price > 0
+     ? (atr / price) * 100
+     : null;
+   const continuationProbabilityPct = outcomes.continuationProbabilityPct;
    const continuationScore = continuationProbabilityPct;
-   const expectedMoveMagnitudeAtr = segment15.averageR !== null ? Math.max(1.5, segment15.averageR) : 2.2;
-   const expectedMoveMagnitudePct = Math.round((expectedMoveMagnitudeAtr * atrPct) * 100) / 100;
-   const expectedDurationMinutes = segment15.avgTimeToTargetSec !== null ? Math.round(segment15.avgTimeToTargetSec / 60) : 45;
+   const expectedMoveMagnitudePct = outcomes.expectedRemainingMovePct;
+   const expectedMoveMagnitudeAtr = expectedMoveMagnitudePct !== null && atrPct !== null && atrPct > 0
+     ? Number((expectedMoveMagnitudePct / atrPct).toFixed(2))
+     : null;
+   const expectedDurationMinutes = outcomes.expectedDurationMinutes;
+   const reversalProbabilityPct = outcomes.reversalProbabilityPct;
+   const outcomeProbabilityByHorizon = outcomes.outcomesByHorizon;
  
    const summaryTextFa = continuationProbabilityPct !== null
-     ? `موتور امواج کالیبره‌شده OOS: احتمال ادامه ${continuationProbabilityPct}٪ | حرکت باقی‌مانده ${expectedMoveMagnitudeAtr} ATR (${expectedMoveMagnitudePct}٪) | مدت ${expectedDurationMinutes} دقیقه.`
-     : 'موتور امواج: UNCALIBRATED؛ احتمال یا امتیاز جایگزین تولید نشد.';
+     ? `مدل outcome-based موج: احتمال ادامه ${continuationProbabilityPct}٪؛ سایر برآوردها فقط در صورت وجود نمونهٔ تاریخی معتبر نمایش داده می‌شوند.`
+     : 'مدل موج UNCALIBRATED؛ احتمال، حرکت، مدت یا stage جایگزین/حدسی تولید نشد.';
  
    return {
      continuationScore,
@@ -2664,6 +2718,8 @@ export interface WaveEngineFullResult {
      expectedMoveMagnitudeAtr,
      expectedMoveMagnitudePct,
      expectedDurationMinutes,
+     reversalProbabilityPct,
+     outcomeProbabilityByHorizon,
      summaryTextFa
    };
  }
@@ -2945,6 +3001,20 @@ export function evaluateAntiChasingGuard(
   atr: number,
   stageDetails?: WaveStageDetails
 ): AntiChasingGuardResult {
+  if (![price, waveOriginPrice, vwap, liquidityTargetPrice, atr].every(Number.isFinite) ||
+    price <= 0 || waveOriginPrice <= 0 || vwap <= 0 || liquidityTargetPrice <= 0 || atr <= 0) {
+    return {
+      isChasingDetected: true,
+      distanceFromWaveOriginPct: 0,
+      distanceFromEmaVwapPct: 0,
+      distanceFromLiquidityTargetPct: 0,
+      currentMoveMfePct: 0,
+      remainingMoveExpectedPct: 0,
+      remainingToCompletedRatio: 0,
+      chaseStatus: 'NO_CHASE_BLOCKED',
+      reasonFa: '🛑 دادهٔ معتبر قیمت، ATR یا ساختار موج موجود نیست؛ ورود مسدود است.'
+    };
+  }
   const atrVal = atr || (price * 0.008);
   const atrPct = (atrVal / price) * 100;
 
@@ -3004,7 +3074,7 @@ export function evaluateEventBasedTrigger(
   stageDetails?: WaveStageDetails
 ): EventBasedTriggerSequenceResult {
   const isLong = direction === 'LONG';
-  const p = candles.length > 0 ? (candles[candles.length - 1][3] ?? candles[candles.length - 1].close ?? 88450) : 88450;
+  const p = candles.length > 0 ? (candles[candles.length - 1][3] ?? candles[candles.length - 1].close ?? Number.NaN) : Number.NaN;
   const recentCandles = candles.slice(-8);
 
   // 1. Sweep: Verified structural sweep or strong liquidity intake
@@ -3100,12 +3170,18 @@ export function runWavePredictionEngine(
   analysis: Partial<AnalysisResult> | any,
   prediction?: any
 ): WaveEngineFullResult {
-  const price = analysis?.price || 88450;
-  const atr = analysis?.atr || (price * 0.008);
+  const price = typeof analysis?.price === 'number' && Number.isFinite(analysis.price) ? analysis.price : 0;
+  const atr = typeof analysis?.atr === 'number' && Number.isFinite(analysis.atr) ? analysis.atr : 0;
   const direction: 'LONG' | 'SHORT' = analysis?.direction === 'SHORT' ? 'SHORT' : 'LONG';
-  const vwap = analysis?.vwap || price;
-  const obi = analysis?.obi ?? 0;
-  const cvdDelta = analysis?.cvdDelta ?? 0;
+  const vwap = typeof analysis?.vwap === 'number' && Number.isFinite(analysis.vwap) ? analysis.vwap : 0;
+  const hasLiveObi = analysis?.realObiData?.status === 'LIVE' &&
+    analysis.realObiData.obi !== null &&
+    (analysis.realObiData.snapshotAgeMs ?? analysis.realObiData.ageMs) <= 10000;
+  const hasLiveCvd = analysis?.orderFlowFeatures?.isRealTradeFlow === true &&
+    analysis.orderFlowFeatures.status === 'LIVE' &&
+    (analysis.orderFlowFeatures.ageMs ?? Infinity) <= 5000;
+  const obi = hasLiveObi ? analysis.realObiData.obi : Number.NaN;
+  const cvdDelta = hasLiveCvd ? analysis.orderFlowFeatures.takerDelta : Number.NaN;
 
   // 1. Stage Classification
   const stageDetails = classifyMarketWaveStage(analysis, prediction);
@@ -3114,11 +3190,17 @@ export function runWavePredictionEngine(
   const predictionMetrics = predictWaveMetrics(stageDetails, analysis);
 
   // 3. Candidates Selection by EV
-  const candidateSelection = evaluateEntryCandidates(price, atr, direction, 1000, 10, analysis);
+  const candidateSelection = price > 0 && atr > 0
+    ? evaluateEntryCandidates(price, atr, direction, 1000, 10, analysis)
+    : { candidates: [], selectedCandidate: null, selectionReasonFa: 'دادهٔ قیمت/ATR معتبر نیست.' };
 
   // 4. Anti-Chasing Filter
-  const waveOriginPrice = direction === 'LONG' ? price - (atr * 2.5) : price + (atr * 2.5);
-  const targetPrice = direction === 'LONG' ? price + (atr * 3.5) : price - (atr * 3.5);
+  const waveOriginPrice = price > 0 && atr > 0
+    ? (direction === 'LONG' ? price - (atr * 2.5) : price + (atr * 2.5))
+    : 0;
+  const targetPrice = price > 0 && atr > 0
+    ? (direction === 'LONG' ? price + (atr * 3.5) : price - (atr * 3.5))
+    : 0;
   const antiChasingGuard = evaluateAntiChasingGuard(price, waveOriginPrice, vwap, targetPrice, atr, stageDetails);
 
   // 5. Event-Based Trigger Sequence
@@ -3131,7 +3213,7 @@ export function runWavePredictionEngine(
     eventTriggerSequence.isAllEventsConfirmed &&
     !!candidateSelection.selectedCandidate;
 
-  let summaryStatusFa = `🌊 موتور پیش‌بینی امواج: مرحله [${stageDetails.stageNameFa}]${predictionMetrics.continuationScore !== null ? ` | HEURISTIC SCORE: ${predictionMetrics.continuationScore}/100` : ''}${predictionMetrics.continuationProbabilityPct !== null ? ` | احتمال مدل‌محور کالیبره‌شده: ${predictionMetrics.continuationProbabilityPct}٪` : ''}.`;
+  let summaryStatusFa = `🌊 موتور پیش‌بینی امواج: مرحله [${stageDetails.stageNameFa}]${predictionMetrics.continuationProbabilityPct !== null ? ` | احتمال ادامهٔ OOS: ${predictionMetrics.continuationProbabilityPct}٪` : ''}.`;
   if (!stageDetails.isTradeableStage) {
     summaryStatusFa = `🛑 ورود متوقف شد: امواج در مرحله ناایمن [${stageDetails.stageNameFa}] قرار دارند.`;
   } else if (antiChasingGuard.isChasingDetected) {

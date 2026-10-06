@@ -52,8 +52,17 @@ export function runScenarioCompetition(
   // استخراج متغیرهای واقعی بازار
   const regime = analysis?.regimeClassification?.activeRegime || 'TREND';
   const adx = analysis?.adx ?? 24;
-  const obi = analysis?.obi ?? 0.12; // Order Book Imbalance
-  const cvdDelta = analysis?.orderFlowFeatures?.takerDelta ?? 5000000;
+  const orderFlow = analysis?.orderFlowFeatures;
+  const hasFreshTradeFlow = orderFlow?.isRealTradeFlow === true &&
+    orderFlow.status === 'LIVE' &&
+    typeof orderFlow.ageMs === 'number' && orderFlow.ageMs <= 5000 &&
+    typeof orderFlow.takerDelta === 'number';
+  const cvdDelta = hasFreshTradeFlow ? orderFlow.takerDelta : null;
+  const obi = analysis?.realObiData?.status === 'LIVE' &&
+    typeof analysis.realObiData.obi === 'number' &&
+    (analysis.realObiData.snapshotAgeMs ?? analysis.realObiData.ageMs) <= 10000
+    ? analysis.realObiData.obi
+    : null; // Order Book Imbalance
   const isSweepActive = Boolean(analysis?.sweepReversalSetup?.isReversalSetupActive);
   const isTrapAlert = Boolean(analysis?.cvdOiMatrix?.institutionalTrapAlert);
   const cascadeRisk = analysis?.liquidationCascadePrediction?.cascadeRiskScore ?? 20;
@@ -68,16 +77,16 @@ export function runScenarioCompetition(
   )));
   const contEV = Number(((contProb / 100) * 2.2 - ((100 - contProb) / 100) * 1.0).toFixed(2));
   const contRegimeFit = regime === 'TREND' || regime === 'EXPANSION' ? 90 : (regime === 'RANGE' ? 25 : 50);
-  const contLiqFit = Math.min(95, Math.max(10, 50 + (cvdDelta > 0 ? 30 : -30)));
+  const contLiqFit = cvdDelta === null ? 50 : Math.min(95, Math.max(10, 50 + (cvdDelta > 0 ? 30 : cvdDelta < 0 ? -30 : 0)));
   const contConf = Math.min(90, Math.max(20, Math.round((adx + contRegimeFit) / 2)));
 
   // ۲. سناریوی PULLBACK (اصلاح درون‌روندی)
   const pullProb = Math.min(88, Math.max(10, Math.round(
-    (regime === 'TREND' && !isSweepActive ? 68 : 35) + (obi < 0 ? 15 : -10)
+    (regime === 'TREND' && !isSweepActive ? 68 : 35) + (obi !== null && obi < 0 ? 15 : obi !== null ? -10 : 0)
   )));
   const pullEV = Number(((pullProb / 100) * 2.4 - ((100 - pullProb) / 100) * 0.9).toFixed(2));
   const pullRegimeFit = regime === 'TREND' ? 95 : (regime === 'EXPANSION' ? 80 : 35);
-  const pullLiqFit = Math.min(95, Math.max(10, 60 + (obi * 40)));
+  const pullLiqFit = obi === null ? 50 : Math.min(95, Math.max(10, 60 + (obi * 40)));
   const pullConf = Math.min(90, Math.max(20, Math.round((pullProb + pullRegimeFit) / 2)));
 
   // ۳. سناریوی REVERSAL (چرخش کلی ساختار)
@@ -113,7 +122,7 @@ export function runScenarioCompetition(
   )));
   const rangeEV = Number(((rangeProb / 100) * 1.8 - ((100 - rangeProb) / 100) * 0.8).toFixed(2));
   const rangeRegimeFit = regime === 'RANGE' ? 98 : 20;
-  const rangeLiqFit = Math.abs(obi) < 0.15 ? 85 : 35;
+  const rangeLiqFit = obi === null ? 50 : Math.abs(obi) < 0.15 ? 85 : 35;
   const rangeConf = Math.min(90, Math.max(20, Math.round((rangeProb + rangeRegimeFit) / 2)));
 
   // لیست کاندیداها به همراه ارزیابی ۵ شرط الزامی Evidence
@@ -134,8 +143,8 @@ export function runScenarioCompetition(
       conf: contConf,
       rFit: contRegimeFit,
       lFit: contLiqFit,
-      dir: cvdDelta >= 0 ? 'LONG' : 'SHORT',
-      triggers: [`شاخص قدرت ADX در سطح ${adx}`, `همگامی جهت CVD و دلتای حجم خریداران`],
+      dir: cvdDelta === null ? 'NEUTRAL' : cvdDelta > 0 ? 'LONG' : cvdDelta < 0 ? 'SHORT' : 'NEUTRAL',
+      triggers: [`شاخص قدرت ADX در سطح ${adx}`, hasFreshTradeFlow ? 'همگامی جهت CVD واقعی' : 'CVD UNKNOWN: دادهٔ ترید زنده در دسترس نیست'],
     },
     {
       type: 'PULLBACK',
@@ -144,7 +153,7 @@ export function runScenarioCompetition(
       conf: pullConf,
       rFit: pullRegimeFit,
       lFit: pullLiqFit,
-      dir: cvdDelta >= 0 ? 'LONG' : 'SHORT',
+      dir: cvdDelta === null ? 'NEUTRAL' : cvdDelta > 0 ? 'LONG' : cvdDelta < 0 ? 'SHORT' : 'NEUTRAL',
       triggers: [`اصلاح موقت به محدوده FVG / Order Block`, `بایاس مثبت ساختار کلان`],
     },
     {

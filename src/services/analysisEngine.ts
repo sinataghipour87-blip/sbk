@@ -747,11 +747,14 @@ export function analyzePro(
 
   // 5. Order Flow & CVD Calculation (Strictly Distinct from L2 Depth OBI)
   const orderFlow = provOrderFlow;
-  const cvdDelta = orderFlow.cvdDelta;
-  const cvdDivergence = orderFlow.cvdDivergence;
-  const takerBuyVol = orderFlow.takerBuyVol;
-  const takerSellVol = orderFlow.takerSellVol;
-  const takerRatio = orderFlow.takerRatio;
+  const hasFreshTradeFlow = orderFlow.isRealTradeFlow === true &&
+    orderFlow.status === 'LIVE' &&
+    typeof orderFlow.ageMs === 'number' && orderFlow.ageMs <= 5000;
+  const cvdDelta = hasFreshTradeFlow ? orderFlow.cvdDelta : null;
+  const cvdDivergence = hasFreshTradeFlow ? orderFlow.cvdDivergence : 'CVD UNKNOWN: live trade-level flow unavailable';
+  const takerBuyVol = hasFreshTradeFlow ? orderFlow.takerBuyVol : null;
+  const takerSellVol = hasFreshTradeFlow ? orderFlow.takerSellVol : null;
+  const takerRatio = hasFreshTradeFlow ? orderFlow.takerRatio : null;
 
   const obvSlope = obv.length > 10 ? obv[obv.length - 1] - obv[obv.length - 10] : 0.0;
   const priceSlope = closes.length > 10 ? price - closes[closes.length - 10] : 0.0;

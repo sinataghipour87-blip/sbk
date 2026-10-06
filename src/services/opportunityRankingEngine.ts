@@ -130,7 +130,7 @@ export class OpportunityRankingEngine {
     const atr = Math.max(20, analysis?.atr || price * 0.007);
     const rsi = analysis?.rsi ?? 50;
     const obi = analysis?.obi ?? 0;
-    const cvd = analysis?.cvdDelta ?? 0;
+    const cvd = analysis?.cvdDelta ?? null;
     const mtf1h = analysis?.mtf1h || 'NEUTRAL';
     const mtf4h = analysis?.mtf4h || 'NEUTRAL';
     const marketRegime = (analysis?.marketRegime as any) || 'TREND';
@@ -148,7 +148,7 @@ export class OpportunityRankingEngine {
     if (mtf1h === 'BULLISH') longHeuristic += 15;
     if (mtf4h === 'BULLISH') longHeuristic += 15;
     if (obi > 0.04) longHeuristic += 12;
-    if (cvd > 0) longHeuristic += 8;
+    if (cvd !== null && cvd > 0) longHeuristic += 8;
     if (rsi > 45 && rsi < 65) longHeuristic += 5;
     if (mtf1h === 'BEARISH') longHeuristic -= 25;
     longHeuristic = Math.max(10, Math.min(95, longHeuristic));
@@ -203,7 +203,7 @@ export class OpportunityRankingEngine {
     if (mtf1h === 'BEARISH') shortHeuristic += 15;
     if (mtf4h === 'BEARISH') shortHeuristic += 15;
     if (obi < -0.04) shortHeuristic += 12;
-    if (cvd < 0) shortHeuristic += 8;
+    if (cvd !== null && cvd < 0) shortHeuristic += 8;
     if (rsi > 35 && rsi < 55) shortHeuristic += 5;
     if (mtf1h === 'BULLISH') shortHeuristic -= 25;
     shortHeuristic = Math.max(10, Math.min(95, shortHeuristic));

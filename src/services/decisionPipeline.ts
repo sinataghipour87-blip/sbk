@@ -312,10 +312,20 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   // =========================================================================
   // STAGE 7: ORDER FLOW & VOLUME DELTA
   // =========================================================================
-  const cvdDelta = analysis?.cvdDelta ?? 0;
-  const takerRatio = analysis?.takerRatio ?? 0.50;
-  const isTakerFlowAligned = isLong ? takerRatio >= 0.42 : takerRatio <= 0.58;
-  const stage7Passed = !pipelineHalted && isTakerFlowAligned;
+  const orderFlow = analysis?.orderFlowFeatures;
+  const isTradeFlowFresh = orderFlow?.isRealTradeFlow === true &&
+    orderFlow.status === 'LIVE' &&
+    typeof orderFlow.ageMs === 'number' && orderFlow.ageMs <= 5000 &&
+    typeof orderFlow.takerRatio === 'number' &&
+    typeof orderFlow.cvdDelta === 'number' &&
+    typeof orderFlow.takerDelta === 'number';
+  const cvdDelta = isTradeFlowFresh ? orderFlow.cvdDelta : null;
+  const takerRatio = isTradeFlowFresh ? orderFlow.takerRatio : null;
+  const isTakerFlowAligned = takerRatio !== null && cvdDelta !== null &&
+    (isLong
+      ? takerRatio >= 0.42 && cvdDelta > 0
+      : takerRatio <= 0.58 && cvdDelta < 0);
+  const stage7Passed = !pipelineHalted && isTradeFlowFresh && isTakerFlowAligned;
 
   stages.push({
     id: 'STAGE_7_ORDER_FLOW',
@@ -323,17 +333,21 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     nameFa: '۷. جریان سفارشات و حجم خرید/فروش تیکر',
     passed: stage7Passed,
     status: pipelineHalted ? 'SKIPPED' : stage7Passed ? 'PASSED' : 'FAILED',
-    value: `Taker Buy Ratio: ${(takerRatio * 100).toFixed(1)}% | CVD: ${cvdDelta.toFixed(1)}`,
+    value: isTradeFlowFresh ? `Taker Buy Ratio: ${(takerRatio * 100).toFixed(1)}% | CVD: ${cvdDelta.toFixed(1)}` : 'Taker Buy Ratio: UNKNOWN | CVD: UNKNOWN',
     threshold: isLong ? 'نسبت خریداران اگرسیو >= ۴۲٪' : 'نسبت خریداران اگرسیو <= ۵۸٪',
     reasonFa: stage7Passed
       ? 'جریان معاملات اگرسیو تیکر با جهت معامله هماهنگ است.'
-      : 'جریان سفارشات لحظه‌ای مارکت به شدت مخالف جهت ورود است.',
+      : !isTradeFlowFresh
+        ? 'CVD و جریان تیکر زنده در دسترس نیست؛ ورود Fail-Closed مسدود شد.'
+        : 'جریان سفارشات لحظه‌ای مارکت با جهت ورود هم‌راستا نیست.',
   });
 
   if (!pipelineHalted && !stage7Passed) {
     pipelineHalted = true;
     activeStage = 'STAGE_7_ORDER_FLOW';
-    rejectionReasonsFa.push(`فشار سفارشات اگرسیو در خلاف جهت (نسبت تیکر ${(takerRatio * 100).toFixed(1)}٪)`);
+    rejectionReasonsFa.push(isTradeFlowFresh
+      ? `فشار سفارشات اگرسیو در خلاف جهت (نسبت تیکر ${(takerRatio * 100).toFixed(1)}٪)`
+      : 'CVD یا جریان تیکر معتبر در دسترس نیست');
     prerequisitesToArmFa.push('مشاهده ورود حجم معاملات فعال (Taker Volume) در جهت تایید حرکت');
   }
 

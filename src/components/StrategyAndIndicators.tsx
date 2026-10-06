@@ -43,11 +43,11 @@ export const StrategyAndIndicators: React.FC<StrategyAndIndicatorsProps> = ({ an
 
             <div className="p-2 rounded-xl bg-[#020b17] border border-cyan-950">
               <span className="text-[10px] text-slate-400 block">دلتا حجم تجمعی (CVD):</span>
-              <span className={`font-bold ${(analysis.cvdDelta || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {(analysis.cvdDelta || 0) >= 0 ? '+' : ''}{(analysis.cvdDelta || 0).toFixed(1)} BTC
+              <span className={`font-bold ${analysis.cvdDelta === null || analysis.cvdDelta === undefined ? 'text-slate-400' : analysis.cvdDelta >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {analysis.cvdDelta === null || analysis.cvdDelta === undefined ? 'UNKNOWN' : `${analysis.cvdDelta >= 0 ? '+' : ''}${analysis.cvdDelta.toFixed(1)} BTC`}
               </span>
               <span className="text-[9px] text-cyan-300 block truncate" title={analysis.cvdDivergence}>
-                {analysis.cvdDivergence || 'تعادل جریان سفارشات'}
+                {analysis.cvdDivergence || 'UNKNOWN'}
               </span>
             </div>
 

@@ -34,8 +34,8 @@ export type DynamicTrailingRung =
 export interface TrendSurvivalFactor {
   factorName: string;
   weightPct: number;
-  score: number; // 0 to 100
-  status: 'EXCELLENT' | 'HEALTHY' | 'DEGRADING' | 'FAILED';
+  score: number | null; // 0 to 100, or null when the feed is unavailable
+  status: 'EXCELLENT' | 'HEALTHY' | 'DEGRADING' | 'FAILED' | 'UNKNOWN';
   descriptionFa: string;
 }
 
@@ -124,8 +124,8 @@ export class TrendSurvivalAndMfeTrailingEngine {
     rsiPrevious: number;
     macdHist: number;
     macdHistPrevious: number;
-    cvdDelta: number;
-    cvdSlope: number; // شیب اخیر دلتای تجمعی
+    cvdDelta: number | null;
+    cvdSlope: number | null; // شیب اخیر دلتای تجمعی
     orderBookImbalance: number; // -1.0 (فروش کامل) تا +1.0 (خرید کامل)
     isStructureIntact: boolean; // آیا سویینگ‌های ساختاری حفظ شده‌اند؟
     distanceToKeyStructurePct: number;
@@ -193,24 +193,19 @@ export class TrendSurvivalAndMfeTrailingEngine {
     };
 
     // ۲. ارزیابی جریان سفارشات و CVD (Order Flow & CVD Health) - وزن ۲۵٪
-    let cvdScore = 50;
-    const isCvdDirectional = isLong ? (cvdDelta > 0 && cvdSlope >= 0) : (cvdDelta < 0 && cvdSlope <= 0);
-    const isCvdReversing = isLong ? (cvdDelta < -30 || cvdSlope < -15) : (cvdDelta > 30 || cvdSlope > 15);
-
-    if (isCvdDirectional) {
-      cvdScore = 92;
-    } else if (isCvdReversing) {
-      cvdScore = 20;
-    } else {
-      cvdScore = 60;
-    }
+    const hasCvdEvidence = cvdDelta !== null && cvdSlope !== null;
+    const isCvdDirectional = hasCvdEvidence && (isLong ? (cvdDelta > 0 && cvdSlope >= 0) : (cvdDelta < 0 && cvdSlope <= 0));
+    const isCvdReversing = hasCvdEvidence && (isLong ? (cvdDelta < -30 || cvdSlope < -15) : (cvdDelta > 30 || cvdSlope > 15));
+    const cvdScore = !hasCvdEvidence ? null : isCvdDirectional ? 92 : isCvdReversing ? 20 : 60;
 
     const orderFlowCvdHealth: TrendSurvivalFactor = {
       factorName: 'Cumulative Volume Delta (CVD)',
-      weightPct: 25,
+      weightPct: hasCvdEvidence ? 25 : 0,
       score: cvdScore,
-      status: cvdScore >= 75 ? 'EXCELLENT' : cvdScore >= 55 ? 'HEALTHY' : cvdScore >= 40 ? 'DEGRADING' : 'FAILED',
-      descriptionFa: cvdScore >= 75
+      status: cvdScore === null ? 'UNKNOWN' : cvdScore >= 75 ? 'EXCELLENT' : cvdScore >= 55 ? 'HEALTHY' : cvdScore >= 40 ? 'DEGRADING' : 'FAILED',
+      descriptionFa: cvdScore === null
+        ? 'CVD UNKNOWN: فید ترید واقعی یا شیب معتبر موجود نیست.'
+        : cvdScore >= 75
         ? 'تزریق مداوم حجم تهاجمی (Aggressive Market Orders) در راستای پوزیشن'
         : cvdScore >= 55
         ? 'جریان دلتای حجم متعادل با برتری نسبی در جهت معامله'
@@ -283,14 +278,15 @@ export class TrendSurvivalAndMfeTrailingEngine {
     };
 
     // محاسبه احتمال نهایی وزن‌دهی شده بقای روند (Trend Survival Probability)
-    const compositeSurvivalProb = Math.round(
+    const totalEvidenceWeight = 75 + (hasCvdEvidence ? 25 : 0);
+    const compositeSurvivalProb = Math.round((
       (momentumScore * 0.25) +
-      (cvdScore * 0.25) +
+      ((cvdScore ?? 0) * (hasCvdEvidence ? 0.25 : 0)) +
       (obiScore * 0.15) +
       (structScore * 0.15) +
       (absScore * 0.10) +
       (volScore * 0.10)
-    );
+    ) * 100 / totalEvidenceWeight);
 
     // تصمیم‌گیری وضعیت Runner و خروج پله‌ای
     let runnerStatus: RunnerPreservationStatus = 'PRESERVE_100_RUNNER';
@@ -534,8 +530,8 @@ export class TrendSurvivalAndMfeTrailingEngine {
     rsiPrevious?: number;
     macdHist?: number;
     macdHistPrevious?: number;
-    cvdDelta?: number;
-    cvdSlope?: number;
+    cvdDelta?: number | null;
+    cvdSlope?: number | null;
     orderBookImbalance?: number;
     isStructureIntact?: boolean;
     distanceToKeyStructurePct?: number;
@@ -564,8 +560,8 @@ export class TrendSurvivalAndMfeTrailingEngine {
     const rsiPrevious = params.rsiPrevious ?? (isLong ? 56 : 44);
     const macdHist = params.macdHist ?? (isLong ? 1.2 : -1.2);
     const macdHistPrevious = params.macdHistPrevious ?? (isLong ? 1.0 : -1.0);
-    const cvdDelta = params.cvdDelta ?? (isLong ? 65 : -65);
-    const cvdSlope = params.cvdSlope ?? (isLong ? 12 : -12);
+    const cvdDelta = params.cvdDelta ?? null;
+    const cvdSlope = params.cvdSlope ?? null;
     const orderBookImbalance = params.orderBookImbalance ?? (isLong ? 0.22 : -0.22);
     const isStructureIntact = params.isStructureIntact ?? true;
     const distanceToKeyStructurePct = params.distanceToKeyStructurePct ?? 1.2;

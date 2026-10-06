@@ -14,7 +14,7 @@
  *    - Take Profit targets engineered for minimum 1:2.5 Risk-to-Reward ratio.
  */
 
-import { Candle, RealOrderBookImbalance } from '../types/trading';
+import { Candle, OrderFlowFeatures, RealOrderBookImbalance } from '../types/trading';
 
 export interface SwingLevel {
   price: number;
@@ -36,38 +36,42 @@ export interface LiquiditySweepSignal {
   takeProfitTarget2: number;    // 1:4.0 R:R
   riskRewardRatio: number;
   cvdDivergenceConfirmed: boolean;
-  orderbookAbsorptionRatio: number;
-  signalConfidencePct: number;
+  orderbookAbsorptionRatio: number | null;
+  signalConfidencePct: number | null;
   rationaleFa: string;
 }
 
 export interface OrderFlowSnapshot {
   currentPrice: number;
   // 21. Trade-Level CVD Architecture
-  deltaBtc: number;
-  cumulativeDeltaBtc: number;
-  cvdValueBtc: number;
-  takerBuyVolumeBtc: number;
-  takerSellVolumeBtc: number;
-  deltaRatio: number; // -1.0 to +1.0
-  deltaVelocityBtcPerSec: number; // d(CVD)/dt
-  deltaAccelerationBtcPerSec2: number; // d²(CVD)/dt²
-  cvdDivergence: 'BULLISH_DIVERGENCE' | 'BEARISH_DIVERGENCE' | 'NEUTRAL';
+  deltaBtc: number | null;
+  cumulativeDeltaBtc: number | null;
+  cvdValueBtc: number | null;
+  takerBuyVolumeBtc: number | null;
+  takerSellVolumeBtc: number | null;
+  deltaRatio: number | null; // -1.0 to +1.0, or null if trade-level data is unavailable
+  deltaVelocityBtcPerSec: number | null; // d(CVD)/dt
+  deltaAccelerationBtcPerSec2: number | null; // d²(CVD)/dt²
+  cvdDivergence: 'BULLISH_DIVERGENCE' | 'BEARISH_DIVERGENCE' | 'NEUTRAL' | 'UNKNOWN';
   
   // 22. Dynamic Order Book Microstructure Engine
-  obi: number; // -1.0 to +1.0
-  obiVelocity: number; // d(OBI)/dt
-  obiAcceleration: number; // d²(OBI)/dt²
-  bidDepthUsd: number;
-  askDepthUsd: number;
-  spreadUsd: number;
-  spreadBps: number;
-  liquidityMigration: 'MIGRATING_UP' | 'MIGRATING_DOWN' | 'STABLE';
-  absorptionRatio: number;
-  wallPersistenceSec: number;
-  wallCancellationDetected: boolean;
+  obi: number | null; // -1.0 to +1.0
+  obiVelocity: number | null; // d(OBI)/dt
+  obiAcceleration: number | null; // d²(OBI)/dt²
+  bidDepthUsd: number | null;
+  askDepthUsd: number | null;
+  spreadUsd: number | null;
+  spreadBps: number | null;
+  liquidityMigration: 'MIGRATING_UP' | 'MIGRATING_DOWN' | 'STABLE' | 'UNKNOWN';
+  absorptionRatio: number | null;
+  wallPersistenceSec: number | null;
+  wallCancellationDetected: boolean | null;
+  liquidityInflowUsd: number | null;
+  liquidityWithdrawalUsd: number | null;
+  spreadCompressionUsd: number | null;
+  spreadExpansionUsd: number | null;
 
-  isAbsorptionDetected: boolean;
+  isAbsorptionDetected: boolean | null;
   activeSignal: LiquiditySweepSignal;
   swingLevels: SwingLevel[];
 }
@@ -150,32 +154,84 @@ export class OrderFlowEngine {
    */
   public analyzeOrderFlowAndLiquidity(
     candles: Candle[],
-    realObi?: RealOrderBookImbalance | null
+    realObi?: RealOrderBookImbalance | null,
+    realTradeFlow?: OrderFlowFeatures | null
   ): OrderFlowSnapshot {
+    const liveTradeFlow = realTradeFlow?.isRealTradeFlow === true &&
+      realTradeFlow.status === 'LIVE' &&
+      typeof realTradeFlow.ageMs === 'number' &&
+      realTradeFlow.ageMs >= 0 && realTradeFlow.ageMs <= 5000 &&
+      typeof realTradeFlow.takerDelta === 'number' && Number.isFinite(realTradeFlow.takerDelta) &&
+      typeof realTradeFlow.takerBuyVol === 'number' && Number.isFinite(realTradeFlow.takerBuyVol) &&
+      typeof realTradeFlow.takerSellVol === 'number' && Number.isFinite(realTradeFlow.takerSellVol);
+    const cvdDelta = liveTradeFlow ? realTradeFlow.takerDelta : null;
+    const cumulativeDelta = liveTradeFlow ? (realTradeFlow.cumulativeDelta ?? realTradeFlow.cvdDelta) : null;
+    const totalTakerVolume = liveTradeFlow ? realTradeFlow.takerBuyVol + realTradeFlow.takerSellVol : null;
+    const deltaRatio = totalTakerVolume !== null && totalTakerVolume > 0 && cvdDelta !== null
+      ? cvdDelta / totalTakerVolume
+      : null;
+    const cvdDivergence = !liveTradeFlow
+      ? 'UNKNOWN'
+      : realTradeFlow.cvdDivergence.includes('صعودی') || realTradeFlow.cvdDivergence.includes('Bullish')
+        ? 'BULLISH_DIVERGENCE'
+        : realTradeFlow.cvdDivergence.includes('نزولی') || realTradeFlow.cvdDivergence.includes('Bearish')
+          ? 'BEARISH_DIVERGENCE'
+          : 'NEUTRAL';
+    const liveOrderBook = realObi?.status === 'LIVE' &&
+      realObi.obi !== null &&
+      (realObi.snapshotAgeMs ?? realObi.ageMs) <= 10000;
+    const currentObi = liveOrderBook ? realObi.obi : null;
+    const currentSpread = liveOrderBook ? (realObi.spreadUsd ?? null) : null;
+    const spreadBps = currentSpread !== null && candles.length > 0
+      ? Number(((currentSpread / candles[candles.length - 1][3]) * 10000).toFixed(2))
+      : null;
+    const obiVelocity = liveOrderBook ? (realObi.obiVelocity ?? null) : null;
+    const obiAcceleration = liveOrderBook ? (realObi.obiAcceleration ?? null) : null;
+    const absorptionRatio = liveOrderBook ? (realObi.absorptionRate ?? null) : null;
+    const wallCancellationDetected = liveOrderBook && realObi.wallCancellationRatio !== null &&
+      realObi.wallCancellationRatio !== undefined
+      ? realObi.wallCancellationRatio >= 0.6
+      : null;
+    const tradePriceChangePct = liveTradeFlow ? (realTradeFlow.tradePriceChangePct ?? null) : null;
+    const isAbsorptionDetected = liveTradeFlow && liveOrderBook &&
+      deltaRatio !== null && deltaRatio !== 0 &&
+      tradePriceChangePct !== null && tradePriceChangePct !== 0
+      ? deltaRatio * tradePriceChangePct < 0
+      : null;
+
     if (!candles || candles.length < 20) {
       return {
         currentPrice: 0,
-        deltaBtc: 0,
-        cumulativeDeltaBtc: 0,
-        cvdValueBtc: 0,
-        takerBuyVolumeBtc: 0,
-        takerSellVolumeBtc: 0,
-        deltaRatio: 0,
-        deltaVelocityBtcPerSec: 0,
-        deltaAccelerationBtcPerSec2: 0,
-        cvdDivergence: 'NEUTRAL',
-        obi: 0,
-        obiVelocity: 0,
-        obiAcceleration: 0,
-        bidDepthUsd: 0,
-        askDepthUsd: 0,
-        spreadUsd: 0,
-        spreadBps: 0,
-        liquidityMigration: 'STABLE',
-        absorptionRatio: 0,
-        wallPersistenceSec: 0,
-        wallCancellationDetected: false,
-        isAbsorptionDetected: false,
+        deltaBtc: cvdDelta,
+        cumulativeDeltaBtc: cumulativeDelta,
+        cvdValueBtc: cumulativeDelta,
+        takerBuyVolumeBtc: totalTakerVolume === null ? null : realTradeFlow.takerBuyVol,
+        takerSellVolumeBtc: totalTakerVolume === null ? null : realTradeFlow.takerSellVol,
+        deltaRatio,
+        deltaVelocityBtcPerSec: liveTradeFlow ? (realTradeFlow.deltaVelocity ?? null) : null,
+        deltaAccelerationBtcPerSec2: null,
+        cvdDivergence,
+        obi: currentObi,
+        obiVelocity,
+        obiAcceleration,
+        bidDepthUsd: liveOrderBook ? realObi.bidDepthUsd : null,
+        askDepthUsd: liveOrderBook ? realObi.askDepthUsd : null,
+        spreadUsd: currentSpread,
+        spreadBps,
+        liquidityMigration: obiVelocity === null
+          ? 'UNKNOWN'
+          : obiVelocity > 0.05 ? 'MIGRATING_UP' : obiVelocity < -0.05 ? 'MIGRATING_DOWN' : 'STABLE',
+        absorptionRatio,
+        wallPersistenceSec: liveOrderBook && realObi.bidWallPersistence !== null && realObi.bidWallPersistence !== undefined &&
+          realObi.askWallPersistence !== null && realObi.askWallPersistence !== undefined
+          ? Math.min(realObi.bidWallPersistence, realObi.askWallPersistence) / 1000
+          : null,
+        wallCancellationDetected: liveOrderBook ? (realObi.wallCancellationObserved ?? wallCancellationDetected) : null,
+        liquidityInflowUsd: liveOrderBook ? (realObi.liquidityInflowUsd ?? null) : null,
+        liquidityWithdrawalUsd: liveOrderBook ? (realObi.liquidityWithdrawalUsd ?? null) : null,
+        spreadCompressionUsd: liveOrderBook ? (realObi.spreadCompressionUsd ?? null) : null,
+        spreadExpansionUsd: liveOrderBook ? (realObi.spreadExpansionUsd ?? null) : null,
+        isAbsorptionDetected,
         activeSignal: {
           symbol: 'BTCUSDT',
           timestamp: Date.now(),
@@ -188,8 +244,8 @@ export class OrderFlowEngine {
           takeProfitTarget2: 0,
           riskRewardRatio: 0,
           cvdDivergenceConfirmed: false,
-          orderbookAbsorptionRatio: 0,
-          signalConfidencePct: 0,
+          orderbookAbsorptionRatio: absorptionRatio,
+          signalConfidencePct: null,
           rationaleFa: 'داده‌های کافی برای تحلیل اردرپیرامون و نقدینگی وجود ندارد.',
         },
         swingLevels: [],
@@ -203,72 +259,22 @@ export class OrderFlowEngine {
     const currentPrice = close;
     const swingLevels = this.findSwingLevels(candles, 40);
 
-    // Calculate Trade-Level CVD (Cumulative Volume Delta) & Delta Velocity / Acceleration
-    let totalTakerBuyBtc = 0;
-    let totalTakerSellBtc = 0;
-
-    for (let i = candles.length - 10; i < candles.length; i++) {
-      const c = candles[i];
-      const cClose = c[3];
-      const cVol = c[4];
-
-      // Estimate or calculate actual trade-level Taker Buy vs Sell Delta
-      const barRange = Math.max(0.01, c[1] - c[2]);
-      const buyPortion = (cClose - c[2]) / barRange;
-      const buyVol = cVol * buyPortion;
-      const sellVol = cVol * (1 - buyPortion);
-
-      totalTakerBuyBtc += buyVol;
-      totalTakerSellBtc += sellVol;
-    }
-
-    const deltaBtc = totalTakerBuyBtc - totalTakerSellBtc;
-    const cumulativeDeltaBtc = deltaBtc * 1.5; // Running cumulative total
-    const totalVolBtc = Math.max(0.1, totalTakerBuyBtc + totalTakerSellBtc);
-    const deltaRatio = parseFloat((deltaBtc / totalVolBtc).toFixed(3));
-
-    // Calculate Delta Velocity and Acceleration
-    const nowMs = Date.now();
-    const dtSec = Math.max(0.1, (nowMs - this.lastTimestampMs) / 1000);
-    const deltaVelocityBtcPerSec = Number(((cumulativeDeltaBtc - this.prevCvd) / dtSec).toFixed(3));
-    const deltaAccelerationBtcPerSec2 = Number(((deltaVelocityBtcPerSec - this.prevCvdVelocity) / dtSec).toFixed(3));
-
-    this.prevCvd = cumulativeDeltaBtc;
-    this.prevCvdVelocity = deltaVelocityBtcPerSec;
-
-    // Detect CVD Divergence vs Price
-    let cvdDivergence: 'BULLISH_DIVERGENCE' | 'BEARISH_DIVERGENCE' | 'NEUTRAL' = 'NEUTRAL';
-    const priceChange = close - open;
-    if (priceChange < 0 && deltaBtc > 5.0) {
-      cvdDivergence = 'BULLISH_DIVERGENCE'; // Passive absorption of selling by buyers
-    } else if (priceChange > 0 && deltaBtc < -5.0) {
-      cvdDivergence = 'BEARISH_DIVERGENCE'; // Passive absorption of buying by sellers
-    }
-
-    // 22. Dynamic Order Book Microstructure Engine
-    const currentObi = realObi?.obi !== undefined ? realObi.obi : (deltaRatio * 0.8);
-    const obiVelocity = Number(((currentObi - this.prevObi) / dtSec).toFixed(3));
-    const obiAcceleration = Number(((obiVelocity - this.prevObiVelocity) / dtSec).toFixed(3));
-
-    this.prevObi = currentObi;
-    this.prevObiVelocity = obiVelocity;
-    this.lastTimestampMs = nowMs;
-
-    const bidDepthUsd = realObi?.bidDepthUsd ?? 1850000;
-    const askDepthUsd = realObi?.askDepthUsd ?? 1620000;
-    const spreadUsd = (realObi as any)?.spreadUsd ?? 0.20;
-    const spreadBps = Number(((spreadUsd / currentPrice) * 10000).toFixed(2));
-
-    const liquidityMigration: 'MIGRATING_UP' | 'MIGRATING_DOWN' | 'STABLE' = 
-      obiVelocity > 0.05 ? 'MIGRATING_UP' : obiVelocity < -0.05 ? 'MIGRATING_DOWN' : 'STABLE';
-
-    // Passive limit order absorption check
-    const barBodyPct = Math.abs(close - open) / Math.max(0.01, high - low);
-    const isAbsorptionDetected = barBodyPct < 0.35 && volume > 100;
-    const absorptionRatio = Number((Math.abs(deltaBtc) / Math.max(1, volume * barBodyPct + 0.1)).toFixed(2));
-
-    const wallPersistenceSec = obiVelocity === 0 ? 45 : Math.max(2, 30 - Math.abs(obiVelocity) * 10);
-    const wallCancellationDetected = Math.abs(obiAcceleration) > 0.15;
+    const deltaBtc = cvdDelta;
+    const cumulativeDeltaBtc = cumulativeDelta;
+    const totalTakerBuyBtc = liveTradeFlow ? realTradeFlow.takerBuyVol : null;
+    const totalTakerSellBtc = liveTradeFlow ? realTradeFlow.takerSellVol : null;
+    const deltaVelocityBtcPerSec = liveTradeFlow ? (realTradeFlow.deltaVelocity ?? null) : null;
+    const deltaAccelerationBtcPerSec2 = null;
+    const liquidityMigration: OrderFlowSnapshot['liquidityMigration'] = obiVelocity === null
+      ? 'UNKNOWN'
+      : obiVelocity > 0.05 ? 'MIGRATING_UP' : obiVelocity < -0.05 ? 'MIGRATING_DOWN' : 'STABLE';
+    const bidDepthUsd = liveOrderBook ? realObi.bidDepthUsd : null;
+    const askDepthUsd = liveOrderBook ? realObi.askDepthUsd : null;
+    const spreadUsd = currentSpread;
+    const wallPersistenceSec = liveOrderBook && realObi.bidWallPersistence !== null && realObi.bidWallPersistence !== undefined &&
+      realObi.askWallPersistence !== null && realObi.askWallPersistence !== undefined
+      ? Math.min(realObi.bidWallPersistence, realObi.askWallPersistence) / 1000
+      : null;
 
     // Detect Liquidity Sweeps against Swing Levels
     let activeSignal: LiquiditySweepSignal = {
@@ -283,8 +289,8 @@ export class OrderFlowEngine {
       takeProfitTarget2: 0,
       riskRewardRatio: 0,
       cvdDivergenceConfirmed: false,
-      orderbookAbsorptionRatio: realObi?.obi ? Math.abs(realObi.obi) : 0,
-      signalConfidencePct: 0,
+      orderbookAbsorptionRatio: absorptionRatio,
+      signalConfidencePct: null,
       rationaleFa: 'هیچ سوئیپ نقدینگی جدیدی در این کندل ثبت نشده است.',
     };
 
@@ -298,8 +304,8 @@ export class OrderFlowEngine {
         const tp1 = currentPrice + riskUsd * 2.8; // Minimum 1:2.8 R:R
         const tp2 = currentPrice + riskUsd * 4.2; // 1:4.2 R:R
 
-        const cvdConfirmed = deltaRatio > -0.15; // Buyers absorbing or turning positive
-        const confidence = cvdConfirmed ? 82 : 70;
+          const cvdConfirmed = deltaRatio !== null && deltaRatio > 0;
+          const confidence = cvdConfirmed ? 82 : null;
 
         activeSignal = {
           symbol: 'BTCUSDT',
@@ -313,9 +319,9 @@ export class OrderFlowEngine {
           takeProfitTarget2: parseFloat(tp2.toFixed(2)),
           riskRewardRatio: 2.8,
           cvdDivergenceConfirmed: cvdConfirmed,
-          orderbookAbsorptionRatio: realObi?.obi ? parseFloat(Math.abs(realObi.obi).toFixed(2)) : 0.45,
+          orderbookAbsorptionRatio: absorptionRatio,
           signalConfidencePct: confidence,
-          rationaleFa: `🎯 سوئیپ نقدینگی صعودی (Bullish Sweep): قیمت سطوح استاپ فروشنده در $${sLow.price.toLocaleString()} را شکار کرد و بازگشت. R:R معامله ۱:۲.۸ است.`,
+          rationaleFa: `🎯 سوئیپ نقدینگی صعودی: سطح $${sLow.price.toLocaleString()} شکسته و بازیابی شد. CVD ${cvdConfirmed ? 'با داده ترید تایید شد' : 'نامشخص است'}؛ تا دریافت جریان ترید، سیگنال تایید آماری ندارد.`,
         };
         break;
       }
@@ -332,8 +338,8 @@ export class OrderFlowEngine {
           const tp1 = currentPrice - riskUsd * 2.8; // Minimum 1:2.8 R:R
           const tp2 = currentPrice - riskUsd * 4.2;
 
-          const cvdConfirmed = deltaRatio < 0.15; // Sellers absorbing
-          const confidence = cvdConfirmed ? 82 : 70;
+          const cvdConfirmed = deltaRatio !== null && deltaRatio < 0;
+          const confidence = cvdConfirmed ? 82 : null;
 
           activeSignal = {
             symbol: 'BTCUSDT',
@@ -347,9 +353,9 @@ export class OrderFlowEngine {
             takeProfitTarget2: parseFloat(tp2.toFixed(2)),
             riskRewardRatio: 2.8,
             cvdDivergenceConfirmed: cvdConfirmed,
-            orderbookAbsorptionRatio: realObi?.obi ? parseFloat(Math.abs(realObi.obi).toFixed(2)) : 0.45,
+            orderbookAbsorptionRatio: absorptionRatio,
             signalConfidencePct: confidence,
-            rationaleFa: `🎯 سوئیپ نقدینگی نزولی (Bearish Sweep): قیمت استاپ‌های خرید بالای $${sHigh.price.toLocaleString()} را شکار کرده و وارد روند اصلاحی شد. R:R معامله ۱:۲.۸ است.`,
+            rationaleFa: `🎯 سوئیپ نقدینگی نزولی: سطح $${sHigh.price.toLocaleString()} شکسته و بازیابی شد. CVD ${cvdConfirmed ? 'با داده ترید تایید شد' : 'نامشخص است'}؛ تا دریافت جریان ترید، سیگنال تایید آماری ندارد.`,
           };
           break;
         }
@@ -358,11 +364,11 @@ export class OrderFlowEngine {
 
     return {
       currentPrice,
-      deltaBtc: parseFloat(deltaBtc.toFixed(2)),
-      cumulativeDeltaBtc: parseFloat(cumulativeDeltaBtc.toFixed(2)),
-      cvdValueBtc: parseFloat(cumulativeDeltaBtc.toFixed(2)),
-      takerBuyVolumeBtc: parseFloat(totalTakerBuyBtc.toFixed(2)),
-      takerSellVolumeBtc: parseFloat(totalTakerSellBtc.toFixed(2)),
+      deltaBtc: deltaBtc === null ? null : parseFloat(deltaBtc.toFixed(2)),
+      cumulativeDeltaBtc: cumulativeDeltaBtc === null ? null : parseFloat(cumulativeDeltaBtc.toFixed(2)),
+      cvdValueBtc: cumulativeDeltaBtc === null ? null : parseFloat(cumulativeDeltaBtc.toFixed(2)),
+      takerBuyVolumeBtc: totalTakerBuyBtc === null ? null : parseFloat(totalTakerBuyBtc.toFixed(2)),
+      takerSellVolumeBtc: totalTakerSellBtc === null ? null : parseFloat(totalTakerSellBtc.toFixed(2)),
       deltaRatio,
       deltaVelocityBtcPerSec,
       deltaAccelerationBtcPerSec2,
@@ -377,7 +383,11 @@ export class OrderFlowEngine {
       liquidityMigration,
       absorptionRatio,
       wallPersistenceSec,
-      wallCancellationDetected,
+      wallCancellationDetected: liveOrderBook ? (realObi.wallCancellationObserved ?? wallCancellationDetected) : null,
+      liquidityInflowUsd: liveOrderBook ? (realObi.liquidityInflowUsd ?? null) : null,
+      liquidityWithdrawalUsd: liveOrderBook ? (realObi.liquidityWithdrawalUsd ?? null) : null,
+      spreadCompressionUsd: liveOrderBook ? (realObi.spreadCompressionUsd ?? null) : null,
+      spreadExpansionUsd: liveOrderBook ? (realObi.spreadExpansionUsd ?? null) : null,
       isAbsorptionDetected,
       activeSignal,
       swingLevels,

@@ -27,7 +27,11 @@ export const HunterOrderFlowDashboardWidget: React.FC<HunterOrderFlowDashboardWi
   analysis,
 }) => {
   const [snapshot, setSnapshot] = useState<OrderFlowSnapshot>(() =>
-    orderFlowEngine.analyzeOrderFlowAndLiquidity(analysis?.rawCandles || [], analysis?.realObiData)
+    orderFlowEngine.analyzeOrderFlowAndLiquidity(
+      analysis?.rawCandles || [],
+      analysis?.realObiData,
+      analysis?.orderFlowFeatures
+    )
   );
   const [executionResult, setExecutionResult] = useState<ExecutedOrderResult | null>(null);
   const [backtestData, setBacktestData] = useState<any | null>(null);
@@ -38,7 +42,8 @@ export const HunterOrderFlowDashboardWidget: React.FC<HunterOrderFlowDashboardWi
     if (analysis?.rawCandles) {
       const snap = orderFlowEngine.analyzeOrderFlowAndLiquidity(
         analysis.rawCandles,
-        analysis.realObiData
+        analysis.realObiData,
+        analysis.orderFlowFeatures
       );
       setSnapshot(snap);
     }
@@ -51,6 +56,9 @@ export const HunterOrderFlowDashboardWidget: React.FC<HunterOrderFlowDashboardWi
   }, [analysis]);
 
   const handleExecuteOrder = async () => {
+    if (snapshot.activeSignal.signalConfidencePct === null) {
+      return;
+    }
     setIsExecuting(true);
     try {
       const res = await hunterExecutionEngine.executeHunterOrder(
@@ -160,29 +168,48 @@ export const HunterOrderFlowDashboardWidget: React.FC<HunterOrderFlowDashboardWi
         <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
           <span className="text-[10px] text-slate-400 block">قیمت زنده BTCUSDT</span>
           <span className="text-base font-black text-amber-400">
-            ${snapshot.currentPrice > 0 ? snapshot.currentPrice.toLocaleString() : '88,450'}
+            {snapshot.currentPrice > 0 ? `$${snapshot.currentPrice.toLocaleString()}` : 'UNAVAILABLE'}
           </span>
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
-          <span className="text-[10px] text-slate-400 block">دلتا CVD (10 کندل)</span>
-          <span className={`text-base font-black ${snapshot.cvdValueBtc >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {snapshot.cvdValueBtc >= 0 ? '+' : ''}{snapshot.cvdValueBtc} BTC
+          <span className="text-[10px] text-slate-400 block">CVD معاملات تیکر (دادهٔ واقعی)</span>
+          <span className={`text-base font-black ${snapshot.cvdValueBtc === null ? 'text-slate-400' : snapshot.cvdValueBtc >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {snapshot.cvdValueBtc === null ? 'UNKNOWN' : `${snapshot.cvdValueBtc >= 0 ? '+' : ''}${snapshot.cvdValueBtc} BTC`}
           </span>
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
           <span className="text-[10px] text-slate-400 block">نسبت بالانس خریدار/فروشنده</span>
           <span className="text-base font-black text-slate-200">
-            {snapshot.deltaRatio >= 0 ? '+' : ''}{(snapshot.deltaRatio * 100).toFixed(1)}%
+            {snapshot.deltaRatio === null ? 'UNKNOWN' : `${snapshot.deltaRatio >= 0 ? '+' : ''}${(snapshot.deltaRatio * 100).toFixed(1)}%`}
           </span>
         </div>
 
         <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
           <span className="text-[10px] text-slate-400 block">وضعیت جذب اردرپیرامون</span>
           <span className={`text-xs font-bold ${snapshot.isAbsorptionDetected ? 'text-emerald-400' : 'text-slate-400'}`}>
-            {snapshot.isAbsorptionDetected ? '⚡ جذب موسساتی فعال' : 'عادی'}
+            {snapshot.isAbsorptionDetected === null ? 'UNKNOWN' : snapshot.isAbsorptionDetected ? '⚡ جذب جریان تایید شد' : 'جذب تایید نشد'}
           </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-5 text-[10px]">
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+          ورود / خروج نقدینگی: {snapshot.liquidityInflowUsd === null || snapshot.liquidityWithdrawalUsd === null
+            ? 'UNKNOWN'
+            : `$${Math.round(snapshot.liquidityInflowUsd).toLocaleString()} / $${Math.round(snapshot.liquidityWithdrawalUsd).toLocaleString()}`}
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+          ماندگاری دیوار: {snapshot.wallPersistenceSec === null ? 'UNKNOWN' : `${snapshot.wallPersistenceSec.toFixed(1)} ثانیه`}
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+          لغو دیوار: {snapshot.wallCancellationDetected === null ? 'UNKNOWN' : snapshot.wallCancellationDetected ? 'مشاهده شد' : 'مشاهده نشد'}
+        </div>
+        <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2">
+          فشردگی / انبساط اسپرد: {snapshot.spreadCompressionUsd === null || snapshot.spreadExpansionUsd === null
+            ? 'UNKNOWN'
+            : `$${snapshot.spreadCompressionUsd.toFixed(2)} / $${snapshot.spreadExpansionUsd.toFixed(2)}`}
         </div>
       </div>
 
@@ -201,18 +228,18 @@ export const HunterOrderFlowDashboardWidget: React.FC<HunterOrderFlowDashboardWi
               <span className="text-sm font-bold text-slate-100 block">
                 سیگنال شکار نقدینگی: {sig.setupType !== 'NONE' ? sig.setupType : 'در حال پایش سطح بعدی...'}
               </span>
-              <span className="text-[10px] text-slate-400">اطمینان الگوریتم: {sig.signalConfidencePct}%</span>
+              <span className="text-[10px] text-slate-400">اطمینان CVD: {sig.signalConfidencePct === null ? 'UNKNOWN' : `${sig.signalConfidencePct}%`}</span>
             </div>
           </div>
 
           {sig.direction !== 'NEUTRAL' && (
             <button
               onClick={handleExecuteOrder}
-              disabled={isExecuting}
+              disabled={isExecuting || sig.signalConfidencePct === null}
               className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs transition flex items-center gap-1.5 shadow-lg"
             >
               <Zap className="w-4 h-4 fill-current" />
-              <span>{isExecuting ? 'در حال ارسال سفارش...' : 'شلیک سفارش (Execute Hunter)'}</span>
+              <span>{isExecuting ? 'در حال ارسال سفارش...' : sig.signalConfidencePct === null ? 'اجرای مسدود: CVD نامشخص' : 'شلیک سفارش (Execute Hunter)'}</span>
             </button>
           )}
         </div>

@@ -97,7 +97,7 @@ export class ExitDecisionEngine {
     const atr = Math.max(15, analysis?.atr || currentPrice * 0.007);
     const rsi = analysis?.rsi ?? 50;
     const obi = analysis?.obi ?? 0;
-    const cvd = analysis?.cvdDelta ?? 0;
+    const cvd = analysis?.cvdDelta ?? null;
     const mtf1h = analysis?.mtf1h || 'NEUTRAL';
 
     // Structure Health Score (0 - 100)
@@ -117,8 +117,8 @@ export class ExitDecisionEngine {
         triggeredEvents.push('OBI_WALL_FLIP');
       }
 
-      if (cvd > 0) structureHealthScore += 10;
-      else if (cvd < -1200) {
+      if (cvd !== null && cvd > 0) structureHealthScore += 10;
+      else if (cvd !== null && cvd < -1200) {
         structureHealthScore -= 20;
         triggeredEvents.push('CVD_COLLAPSE_DIVERGENCE');
       }
@@ -129,8 +129,8 @@ export class ExitDecisionEngine {
         triggeredEvents.push('OBI_WALL_FLIP');
       }
 
-      if (cvd < 0) structureHealthScore += 10;
-      else if (cvd > 1200) {
+      if (cvd !== null && cvd < 0) structureHealthScore += 10;
+      else if (cvd !== null && cvd > 1200) {
         structureHealthScore -= 20;
         triggeredEvents.push('CVD_COLLAPSE_DIVERGENCE');
       }

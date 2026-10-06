@@ -443,7 +443,18 @@ export async function fetchDerivatives(): Promise<DerivativesData> {
 }
 
 // Track previous orderbook snapshots for velocity, acceleration, and persistence dynamics (Item 12)
-let prevObiHistory: Array<{ timestamp: number; obi: number; bidDepth: number; askDepth: number; bestBid: number; bestAsk: number }> = [];
+let prevObiHistory: Array<{
+  timestamp: number;
+  obi: number;
+  bidDepth: number;
+  askDepth: number;
+  bestBid: number;
+  bestAsk: number;
+  bidWallPrice: number;
+  bidWallUsd: number;
+  askWallPrice: number;
+  askWallUsd: number;
+}> = [];
 
 // 4. Real Order Book Imbalance (OBI) & Dynamics derived strictly from Bybit Linear Futures L2 OrderBook (Item 12 & 32)
 export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbalance> {
@@ -471,6 +482,14 @@ export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbala
     const url = 'https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=50';
     const { data, latencyMs } = await safeFetchJson<BybitOrderbookResp>(url, 4000);
     if (data?.result?.b && data?.result?.a && data.result.b.length > 0 && data.result.a.length > 0) {
+      const hasValidLevels = [...data.result.b, ...data.result.a].every((row) => {
+        const price = parseFloat(row[0]);
+        const size = parseFloat(row[1]);
+        return Number.isFinite(price) && price > 0 && Number.isFinite(size) && size > 0;
+      });
+      if (!hasValidLevels) {
+        throw new Error('Live order-book payload contains an invalid level.');
+      }
       // Calculate true L2 depth in USD for top 25 levels
       const topLevels = 25;
       const bids = data.result.b.slice(0, topLevels);
@@ -495,28 +514,62 @@ export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbala
       const bestBid = parseFloat(bids[0][0]);
       const bestAsk = parseFloat(asks[0][0]);
       const currentSpread = bestAsk - bestBid;
+      const largestWall = (rows: string[][]): { price: number; notionalUsd: number } =>
+        rows.reduce((wall, row) => {
+          const price = parseFloat(row[0]);
+          const notionalUsd = price * parseFloat(row[1]);
+          return notionalUsd > wall.notionalUsd ? { price, notionalUsd } : wall;
+        }, { price: 0, notionalUsd: 0 });
+      const bidWall = largestWall(bids);
+      const askWall = largestWall(asks);
 
       if (totalDepth > 0) {
         const currentObi = (bidDepthUsd - askDepthUsd) / totalDepth;
         const ts = data.result.ts || now;
-        const snapshotAgeMs = Math.max(0, now - ts);
+        if (!Number.isFinite(ts) || ts <= 0 || ts > now) {
+          throw new Error('Live order-book timestamp is invalid or in the future.');
+        }
+        if (!Number.isFinite(currentSpread) || currentSpread < 0) {
+          throw new Error('Live order-book spread is invalid.');
+        }
+        const snapshotAgeMs = now - ts;
 
         // Calculate OBI Velocity & Acceleration from historical snapshots (Item 12)
-        let obiVelocity = 0;
-        let obiAcceleration = 0;
-        let bidWallPersistence = 85;
-        let askWallPersistence = 85;
-        let wallCancellationRatio = 0.05;
-        let absorptionRate = 0.45;
-        let spoofingSuspicion = false;
-        let spreadChange = 0;
-        let liquidityMigration: 'TOWARD_INSIDE' | 'TOWARD_OUTSIDE' | 'STABLE' = 'STABLE';
+        let obiVelocity: number | null = null;
+        let obiAcceleration: number | null = null;
+        let bidWallPersistence: number | null = null;
+        let askWallPersistence: number | null = null;
+        let wallCancellationRatio: number | null = null;
+        let absorptionRate: number | null = null;
+        let liquidityInflowUsd: number | null = null;
+        let liquidityWithdrawalUsd: number | null = null;
+        let spreadCompressionUsd: number | null = null;
+        let spreadExpansionUsd: number | null = null;
+        let spoofingSuspicion: boolean | null = null;
+        let wallCancellationObserved: boolean | null = null;
+        let spreadChange: number | null = null;
+        let liquidityMigration: 'TOWARD_INSIDE' | 'TOWARD_OUTSIDE' | 'STABLE' | 'UNKNOWN' = 'UNKNOWN';
 
         if (prevObiHistory.length > 0) {
           const lastSnap = prevObiHistory[prevObiHistory.length - 1];
           const dtSec = Math.max(0.5, (ts - lastSnap.timestamp) / 1000);
           obiVelocity = (currentObi - lastSnap.obi) / dtSec;
           spreadChange = currentSpread - (lastSnap.bestAsk - lastSnap.bestBid);
+          spreadCompressionUsd = Math.max(0, -spreadChange);
+          spreadExpansionUsd = Math.max(0, spreadChange);
+          const bidDepthDelta = bidDepthUsd - lastSnap.bidDepth;
+          const askDepthDelta = askDepthUsd - lastSnap.askDepth;
+          liquidityInflowUsd = Math.max(0, bidDepthDelta) + Math.max(0, askDepthDelta);
+          liquidityWithdrawalUsd = Math.max(0, -bidDepthDelta) + Math.max(0, -askDepthDelta);
+          wallCancellationRatio = Math.min(
+            1,
+            liquidityWithdrawalUsd / Math.max(1, lastSnap.bidDepth + lastSnap.askDepth)
+          );
+          const bidWallStillPresent = Math.abs(bidWall.price - lastSnap.bidWallPrice) / Math.max(1, lastSnap.bidWallPrice) <= 0.001;
+          const askWallStillPresent = Math.abs(askWall.price - lastSnap.askWallPrice) / Math.max(1, lastSnap.askWallPrice) <= 0.001;
+          wallCancellationObserved = (lastSnap.bidWallUsd > 0 && !bidWallStillPresent) ||
+            (lastSnap.askWallUsd > 0 && !askWallStillPresent);
+          spoofingSuspicion = wallCancellationObserved && wallCancellationRatio >= 0.2;
 
           if (prevObiHistory.length > 1) {
             const prevSnap2 = prevObiHistory[prevObiHistory.length - 2];
@@ -525,19 +578,29 @@ export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbala
             obiAcceleration = (obiVelocity - prevVelocity) / dtSec;
           }
 
-          // Wall persistence & spoofing detection: sudden appearance and disappearance of huge wall without volume
-          const bidDepthChange = Math.abs(bidDepthUsd - lastSnap.bidDepth) / Math.max(1, lastSnap.bidDepth);
-          const askDepthChange = Math.abs(askDepthUsd - lastSnap.askDepth) / Math.max(1, lastSnap.askDepth);
-          if (bidDepthChange > 0.6 || askDepthChange > 0.6) {
-            spoofingSuspicion = true;
-            wallCancellationRatio = 0.35;
-          }
+          const wallPersistence = (side: 'bid' | 'ask'): number | null => {
+            const currentPrice = side === 'bid' ? bidWall.price : askWall.price;
+            if (currentPrice <= 0) return null;
+            let firstSeenTimestamp: number | null = null;
+            for (let i = prevObiHistory.length - 1; i >= 0; i -= 1) {
+              const snapshot = prevObiHistory[i];
+              const priorWallPrice = side === 'bid' ? snapshot.bidWallPrice : snapshot.askWallPrice;
+              if (priorWallPrice <= 0 ||
+                Math.abs(currentPrice - priorWallPrice) / Math.max(1, priorWallPrice) > 0.001) break;
+              firstSeenTimestamp = snapshot.timestamp;
+            }
+            return firstSeenTimestamp === null ? null : Math.max(0, ts - firstSeenTimestamp);
+          };
+          bidWallPersistence = wallPersistence('bid');
+          askWallPersistence = wallPersistence('ask');
 
           // Liquidity migration
           if (Math.abs(nearImbalance) > Math.abs(farImbalance) + 0.2) {
             liquidityMigration = 'TOWARD_INSIDE';
           } else if (Math.abs(farImbalance) > Math.abs(nearImbalance) + 0.2) {
             liquidityMigration = 'TOWARD_OUTSIDE';
+          } else {
+            liquidityMigration = 'STABLE';
           }
         }
 
@@ -547,7 +610,11 @@ export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbala
           bidDepth: bidDepthUsd,
           askDepth: askDepthUsd,
           bestBid,
-          bestAsk
+          bestAsk,
+          bidWallPrice: bidWall.price,
+          bidWallUsd: bidWall.notionalUsd,
+          askWallPrice: askWall.price,
+          askWallUsd: askWall.notionalUsd
         });
         if (prevObiHistory.length > 20) prevObiHistory.shift();
 
@@ -555,6 +622,9 @@ export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbala
           obi: Math.round(currentObi * 1000) / 1000,
           bidDepthUsd: Math.round(bidDepthUsd),
           askDepthUsd: Math.round(askDepthUsd),
+          bestBid,
+          bestAsk,
+          spreadUsd: currentSpread,
           levelsCount: Math.min(data.result.b.length, topLevels),
           status: 'LIVE',
           timestamp: ts,
@@ -562,15 +632,20 @@ export async function fetchRealOrderBookImbalance(): Promise<RealOrderBookImbala
           snapshotAgeMs,
           latencyMs,
           source: 'Bybit Linear Futures L2 OrderBook',
-          obiVelocity: Math.round(obiVelocity * 10000) / 10000,
-          obiAcceleration: Math.round(obiAcceleration * 10000) / 10000,
+          obiVelocity: obiVelocity === null ? null : Math.round(obiVelocity * 10000) / 10000,
+          obiAcceleration: obiAcceleration === null ? null : Math.round(obiAcceleration * 10000) / 10000,
           bidWallPersistence,
           askWallPersistence,
-          wallCancellationRatio: Math.round(wallCancellationRatio * 100) / 100,
-          absorptionRate: Math.round(absorptionRate * 100) / 100,
+          wallCancellationRatio: wallCancellationRatio === null ? null : Math.round(wallCancellationRatio * 100) / 100,
+          absorptionRate,
+          liquidityInflowUsd,
+          liquidityWithdrawalUsd,
+          spreadCompressionUsd,
+          spreadExpansionUsd,
           spoofingSuspicion,
+          wallCancellationObserved,
           liquidityMigration,
-          spreadChange: Math.round(spreadChange * 100) / 100,
+          spreadChange: spreadChange === null ? null : Math.round(spreadChange * 100) / 100,
           depthImbalanceByDistance: {
             nearPct: Math.round(nearImbalance * 100),
             midPct: Math.round(midImbalance * 100),
@@ -633,6 +708,7 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
       let takerBuyVol = 0;
       let takerSellVol = 0;
       let cumulativeDelta = 0;
+      let cvdDeltaUsd = 0;
       const trades = data.result.list;
 
       const oldestTime = parseInt(trades[trades.length - 1].time || '0', 10);
@@ -645,12 +721,19 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
 
       trades.forEach((t) => {
         const size = parseFloat(t.size || '0');
+        const price = parseFloat(t.price || '0');
+        if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(price) || price <= 0 ||
+          (t.side !== 'Buy' && t.side !== 'Sell')) {
+          throw new Error('Live trade-flow payload contains an invalid trade.');
+        }
         if (t.side === 'Buy') {
           takerBuyVol += size;
           cumulativeDelta += size;
+          cvdDeltaUsd += size * price;
         } else if (t.side === 'Sell') {
           takerSellVol += size;
           cumulativeDelta -= size;
+          cvdDeltaUsd -= size * price;
         }
       });
 
@@ -662,6 +745,10 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
       const newestPrice = parseFloat(trades[0].price || '0');
       const oldestPrice = parseFloat(trades[trades.length - 1].price || '0');
       const priceDelta = newestPrice - oldestPrice;
+      if (!Number.isFinite(newestPrice) || !Number.isFinite(oldestPrice) || oldestPrice <= 0) {
+        throw new Error('Live trade-flow price progression is invalid.');
+      }
+      const tradePriceChangePct = (priceDelta / oldestPrice) * 100;
 
       let cvdDivergence = 'جریان خرید و فروش حقیقی متوازن است';
       if (priceDelta <= 0 && delta > 0) {
@@ -672,11 +759,13 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
 
       const res: OrderFlowFeatures = {
         cvdDelta: Math.round(cumulativeDelta * 100) / 100,
+        cvdDeltaUsd: Math.round(cvdDeltaUsd * 100) / 100,
         cvdDivergence,
         takerBuyVol: Math.round(takerBuyVol * 100) / 100,
         takerSellVol: Math.round(takerSellVol * 100) / 100,
         takerRatio: Math.round(takerRatio * 1000) / 1000,
         takerDelta: Math.round(delta * 100) / 100,
+        tradePriceChangePct: Math.round(tradePriceChangePct * 10000) / 10000,
         delta: Math.round(delta * 100) / 100,
         cumulativeDelta: Math.round(cumulativeDelta * 100) / 100,
         deltaVelocity: Math.round(deltaVelocity * 100) / 100,
@@ -695,15 +784,16 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
 
   // Item 11: If trade flow is unavailable, return UNAVAILABLE status and do not fake it!
   const unavailable: OrderFlowFeatures = {
-    cvdDelta: 0,
+    cvdDelta: null,
+    cvdDeltaUsd: null,
     cvdDivergence: 'داده‌های جریان معاملات مارکت در دسترس نیست (UNAVAILABLE)',
-    takerBuyVol: 0,
-    takerSellVol: 0,
-    takerRatio: 0.5,
-    takerDelta: 0,
-    delta: 0,
-    cumulativeDelta: 0,
-    deltaVelocity: 0,
+    takerBuyVol: null,
+    takerSellVol: null,
+    takerRatio: null,
+    takerDelta: null,
+    delta: null,
+    cumulativeDelta: null,
+    deltaVelocity: null,
     isRealTradeFlow: false,
     status: 'UNAVAILABLE'
   };
@@ -716,15 +806,16 @@ export function calculateOrderFlowFeatures(candles: Candle[]): OrderFlowFeatures
   // If only candle estimation without real trade feed, mark clearly as unavailable/estimated
   if (!candles || candles.length < 5) {
     return {
-      cvdDelta: 0,
+      cvdDelta: null,
+      cvdDeltaUsd: null,
       cvdDivergence: 'داده‌های جریان سفارش در دسترس نیست (UNAVAILABLE)',
-      takerBuyVol: 0,
-      takerSellVol: 0,
-      takerRatio: 0.5,
-      takerDelta: 0,
-      delta: 0,
-      cumulativeDelta: 0,
-      deltaVelocity: 0,
+      takerBuyVol: null,
+      takerSellVol: null,
+      takerRatio: null,
+      takerDelta: null,
+      delta: null,
+      cumulativeDelta: null,
+      deltaVelocity: null,
       isRealTradeFlow: false,
       status: 'UNAVAILABLE'
     };
@@ -732,15 +823,16 @@ export function calculateOrderFlowFeatures(candles: Candle[]): OrderFlowFeatures
 
   // Return unavailable status when real trade flow is not injected
   return {
-    cvdDelta: 0,
+    cvdDelta: null,
+    cvdDeltaUsd: null,
     cvdDivergence: 'جریان واقعی سفارشات (CVD) نیازمند استعلام از فید تریدهای زنده است (UNAVAILABLE)',
-    takerBuyVol: 0,
-    takerSellVol: 0,
-    takerRatio: 0.5,
-    takerDelta: 0,
-    delta: 0,
-    cumulativeDelta: 0,
-    deltaVelocity: 0,
+    takerBuyVol: null,
+    takerSellVol: null,
+    takerRatio: null,
+    takerDelta: null,
+    delta: null,
+    cumulativeDelta: null,
+    deltaVelocity: null,
     isRealTradeFlow: false,
     status: 'UNAVAILABLE'
   };
