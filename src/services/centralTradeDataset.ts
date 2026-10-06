@@ -206,20 +206,36 @@ export class CentralTradeDatasetService {
         tp2: analysis?.tp2 ?? null,
         tp3: analysis?.tp3 ?? null,
       },
-      probability: typeof analysis?.calibratedWinProb === 'number' ? analysis.calibratedWinProb : null,
+      probability: analysis?.calibratedMetadata?.isCalibrationVerified === true &&
+        typeof analysis.calibratedMetadata.calibratedWinProbability === 'number'
+        ? analysis.calibratedMetadata.calibratedWinProbability
+        : null,
       confidenceInterval: analysis?.confidenceInterval ?? null,
       modelVersion: analysis?.modelVersion || 'v2.1_real',
-      featureVersion: 'v2.0',
+      featureVersion: 'v4.0-central-probability',
       decisionVersion: 'v2.0',
       features: {
         rsi: analysis?.rsi ?? null,
         adx: analysis?.adx ?? null,
         atr: atr,
+        volatilityPct: vol,
         vwap: analysis?.vwap ?? null,
         ema20: analysis?.ema20Val ?? null,
         ema50: analysis?.ema50Val ?? null,
         ema200: analysis?.ema200Val ?? null,
-        obi: obi,
+        scoreLong: analysis?.scoreLong ?? null,
+        scoreShort: analysis?.scoreShort ?? null,
+        regimeProbabilities: analysis?.regimeClassification?.regimeProbabilities ?? null,
+        regimeModelCalibrated: analysis?.regimeClassification?.probabilityModelValidation?.status === 'CALIBRATED',
+        calibrationErrorPct: typeof analysis?.calibratedMetadata?.expectedCalibrationError === 'number'
+          ? analysis.calibratedMetadata.expectedCalibrationError * 100
+          : null,
+        signalAgeMs: typeof (analysis?.canonicalSnapshot?.timestampUtc ?? analysis?.realObiData?.timestamp) === 'number'
+          ? Math.max(0, Date.now() - (analysis?.canonicalSnapshot?.timestampUtc ?? analysis?.realObiData?.timestamp))
+          : null,
+        oiChangePct: analysis?.cvdOiMatrix?.openInterestChangePct ?? null,
+        modelAgreementPct: analysis?.modelAgreementPct ?? null,
+        obi: analysis?.realObiData?.obi ?? obi,
         cvdDelta: cvd,
         takerRatio: analysis?.takerRatio ?? null,
       },
@@ -229,7 +245,7 @@ export class CentralTradeDatasetService {
         imbalancePct: obi !== null ? Math.round(obi * 100) : null,
       },
       CVD: cvd,
-      funding: analysis?.fundingRate ?? null,
+      funding: analysis?.cvdOiMatrix?.fundingRatePct ?? analysis?.fundingRate ?? null,
       OI: analysis?.oi ?? null,
       volatility: vol,
       spread: analysis?.canonicalSnapshot?.basisSpreadBps ?? null,

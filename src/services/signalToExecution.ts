@@ -8,6 +8,7 @@ import { orderExecutionLifecycleService } from './orderExecutionLifecycleEngine'
 import { signalExpirationEngine } from './signalExpirationEngine';
 import { missingDataIntegrityGuard } from './missingDataIntegrityGuard';
 import { centralPriceSourcePolicy } from './priceSourcePolicy';
+import { getLatestMultiBrainConsensusReport } from './multiBrainEnsemble';
 
 
 export interface IndicatorScoreBreakdown {
@@ -935,6 +936,10 @@ export function buildExecutionPosition(
     analysis,
     targetDirection: direction,
     prediction: aiPrediction,
+    multiBrainReport: getLatestMultiBrainConsensusReport(
+      analysis.price,
+      analysis.canonicalSnapshot?.timestampUtc ?? analysis.realObiData?.timestamp ?? null
+    ),
     tradeHistory,
     balance: balance || 1000,
     userLeverage: adjustedLev,
@@ -1012,4 +1017,3 @@ export function buildExecutionPosition(
     rejectionReason: isRejected ? rejectionReason : undefined,
   };
 }
-

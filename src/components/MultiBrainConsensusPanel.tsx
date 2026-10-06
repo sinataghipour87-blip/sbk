@@ -4,6 +4,7 @@ import {
   Zap,
   ShieldCheck,
   Sparkles,
+  AlertTriangle,
   TrendingUp,
   TrendingDown,
   Activity,
@@ -82,13 +83,20 @@ export const MultiBrainConsensusPanel: React.FC<Props> = ({
             <div>
               <span className="text-[10px] text-slate-400 block mb-0.5 font-sans">جهت اجماع مدل‌ها:</span>
               <span className={`text-sm font-black flex items-center gap-1 ${
-                report.masterDirection === 'LONG' ? 'text-emerald-400' : 'text-rose-400'
+                report.masterDirection === 'LONG' ? 'text-emerald-400' : report.masterDirection === 'SHORT' ? 'text-rose-400' : 'text-amber-300'
               }`}>
-                {report.masterDirection === 'LONG' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                <span>{report.masterDirection === 'LONG' ? 'صعودی (LONG)' : 'نزولی (SHORT)'}</span>
+                {report.masterDirection === 'LONG'
+                  ? <TrendingUp className="w-4 h-4" />
+                  : report.masterDirection === 'SHORT'
+                    ? <TrendingDown className="w-4 h-4" />
+                    : <AlertTriangle className="w-4 h-4" />}
+                <span>{report.masterDirection === 'LONG' ? 'صعودی (LONG)' : report.masterDirection === 'SHORT' ? 'نزولی (SHORT)' : 'توقف (WAIT)'}</span>
               </span>
               <span className="text-[9px] text-indigo-300 block font-sans mt-0.5">
                 احتمال اجماع مدل‌ها: {report.consensusScorePct}٪
+              </span>
+              <span className="text-[9px] text-amber-300 block font-sans mt-0.5">
+                ریسک اختلاف مدل‌ها: {report.modelDisagreement.disagreementIndex}٪ · {report.modelDisagreement.verdictFa}
               </span>
             </div>
             <div className="w-11 h-11 rounded-xl bg-indigo-950/80 border border-indigo-500/40 flex items-center justify-center font-bold text-indigo-300">
@@ -100,7 +108,7 @@ export const MultiBrainConsensusPanel: React.FC<Props> = ({
           <div className="bg-[#030c1d] border border-cyan-500/40 rounded-xl p-3">
             <span className="text-[10px] text-slate-400 block mb-0.5 font-sans">احتمال برد کالیبره‌شده:</span>
             <div className="text-base font-black text-cyan-300">
-              {report.winProbabilityPct}٪
+              {report.winProbabilityPct !== null ? `${report.winProbabilityPct}٪` : 'نامشخص'}
             </div>
             <span className="text-[9px] text-emerald-400 block font-sans">
               درجه: [{report.confidenceGrade}]
@@ -231,16 +239,22 @@ export const MultiBrainConsensusPanel: React.FC<Props> = ({
                     <span>{m.nameFa}</span>
                   </span>
                   <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${
-                    m.prediction === 'BULLISH' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'
+                    m.prediction === 'BULLISH'
+                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                      : m.prediction === 'BEARISH'
+                        ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                        : 'bg-slate-800 text-slate-300 border border-slate-700'
                   }`}>
                     {m.prediction}
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-[11px] font-mono pt-1 text-slate-300">
-                  <div>احتمال خام: <strong className="text-cyan-300">{m.rawProbabilityPct}٪</strong></div>
-                  <div>دقت تاریخی: <strong className="text-emerald-300">{m.historicalPrecisionPct}٪</strong></div>
+                  <div>احتمال خام: <strong className="text-cyan-300">{m.rawProbabilityPct !== null ? `${m.rawProbabilityPct}٪` : 'نامشخص'}</strong></div>
+                  <div>دقت OOS: <strong className="text-emerald-300">{m.historicalPrecisionPct !== null ? `${m.historicalPrecisionPct}٪` : 'UNVALIDATED'}</strong></div>
                   <div>حجم نمونه: <strong className="text-indigo-300">{m.sampleSize}</strong></div>
                   <div>ضریب استقلال (Decorrelation): <strong className="text-amber-300">{(1 - m.correlationWithOtherModels).toFixed(2)}</strong></div>
+                  <div>سلامت مدل: <strong className={m.healthState === 'HEALTHY' ? 'text-emerald-300' : 'text-rose-300'}>{m.healthState}</strong></div>
+                  <div>وزن Ensemble: <strong className="text-cyan-300">{m.healthState === 'HEALTHY' ? `${(m.effectiveWeight * 100).toFixed(1)}٪` : '۰٪ · خارج از Ensemble'}</strong></div>
                 </div>
               </div>
             ))}

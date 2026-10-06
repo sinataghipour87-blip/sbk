@@ -13,6 +13,7 @@ import {
   VersionMetadata,
   MasterDecisionObject,
   MetaLearnerInputFeatures,
+  MetaModelHealthState,
 } from '../types/trading';
 import { evaluateCognitiveConviction } from './kellyRisk';
 import { runWavePredictionEngine } from './predictiveEngine';
@@ -23,6 +24,8 @@ import { opportunityRankingEngine } from './opportunityRankingEngine';
 import { metaModelEnsembleEngine } from './metaModelEnsemble';
 import { realBayesianEngine } from './realBayesianEngine';
 import { realGarchEngine } from './realGarchEngine';
+import { entryOpportunityAndTiming } from './entryOpportunityAndTiming';
+import type { MultiBrainConsensusReport } from './multiBrainEnsemble';
 
 
 /**
@@ -44,6 +47,7 @@ export interface RunPipelineOptions {
   analysis: AnalysisResult;
   targetDirection?: 'LONG' | 'SHORT';
   prediction?: any;
+  multiBrainReport?: MultiBrainConsensusReport | null;
   tradeHistory?: TradeHistory[];
   balance?: number;
   userLeverage?: number;
@@ -60,6 +64,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     analysis,
     targetDirection,
     prediction,
+    multiBrainReport = null,
     tradeHistory = [],
     balance = 1000,
     userLeverage,
@@ -86,9 +91,29 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
 
   const isLong = resolvedDir === 'LONG';
   const price = analysis?.price || 0;
+  const sourceTimestampMs = analysis?.canonicalSnapshot?.timestampUtc ?? analysis?.realObiData?.timestamp ?? null;
+  const hasCurrentMultiBrainReport = Boolean(
+    multiBrainReport &&
+    timestampMs - multiBrainReport.timestampMs >= 0 &&
+    timestampMs - multiBrainReport.timestampMs <= 3000 &&
+    multiBrainReport.sourceTimestampMs !== null &&
+    sourceTimestampMs !== null &&
+    Math.abs(
+      multiBrainReport.sourceTimestampMs - sourceTimestampMs
+    ) <= 250 &&
+    Math.abs(multiBrainReport.currentPrice - price) / Math.max(price, 1) <= 0.0015
+  );
+  const healthyBrainModelCount = multiBrainReport?.independentModels.filter(model =>
+    model.healthState === 'HEALTHY' &&
+    model.rawProbabilityPct !== null &&
+    Number.isFinite(model.rawProbabilityPct) &&
+    model.rawProbabilityPct > 0 &&
+    model.rawProbabilityPct <= 100
+  ).length ?? 0;
+  const hasHealthyMultiBrainEnsemble = hasCurrentMultiBrainReport && healthyBrainModelCount >= 2;
 
   // Check Selective Activation from Multi-Dimensional Performance Matrix (Items 20 & 67)
-  const segmentCheck = centralTradeDatasetService.isSegmentActivated('15m', resolvedDir, (analysis?.marketRegime as any) || 'TREND');
+  const segmentCheck = centralTradeDatasetService.isSegmentActivated('15m', resolvedDir, 'UNKNOWN');
 
   const stages: DecisionPipelineStageState[] = [];
   const rejectionReasonsFa: string[] = [];
@@ -162,12 +187,21 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   const adx = analysis?.adx ?? null;
   const isChaoticTurbulence = volPct !== null && adx !== null && volPct > 4.5 && adx < 15; // Unpredictable chaotic chop
   const isNoTradeVetoed = Boolean(analysis?.noTradePrediction?.isNoTradeTriggered);
-  const stage3Passed = !pipelineHalted && volPct !== null && !isChaoticTurbulence && !isNoTradeVetoed && segmentCheck.isAllowed;
+  const regimeProbabilityValidation = analysis?.regimeClassification?.probabilityModelValidation;
+  const isRegimeProbabilityValidated = regimeProbabilityValidation?.status === 'CALIBRATED';
+  const stage3Passed =
+    !pipelineHalted &&
+    volPct !== null &&
+    !isChaoticTurbulence &&
+    !isNoTradeVetoed &&
+    segmentCheck.isAllowed &&
+    isRegimeProbabilityValidated;
 
   let stage3ReasonFa = `رژیم بازار (${analysis?.marketRegime || 'پایدار'}) برای اجرای استراتژی همگن است.`;
   if (volPct === null) stage3ReasonFa = 'داده نوسانات (Volatility) در دسترس نیست (DATA_UNAVAILABLE).';
   else if (isNoTradeVetoed) stage3ReasonFa = analysis?.noTradePrediction?.overrideMessageFa || 'وتوی آماری فعال: احتمال نویز و نامناسب بودن بازار از حد آستانه مجاز فراتر است.';
   else if (isChaoticTurbulence) stage3ReasonFa = 'بازار در رژیم شوک هیجانی تصادفی یا رنج فرسایشی شدید قرار دارد.';
+  else if (!isRegimeProbabilityValidated) stage3ReasonFa = 'مدل احتمال رژیم فاقد اعتبارسنجی OOS کافی است؛ ورود تا تکمیل دادهٔ مستقل در وضعیت WAIT می‌ماند.';
   else if (!segmentCheck.isAllowed) stage3ReasonFa = segmentCheck.rejectionReasonFa || 'ستاپ در این رژیم بر اساس ماتریس عملکرد تاریخی غیرفعال است.';
 
   stages.push({
@@ -347,9 +381,9 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   // =========================================================================
   // STAGE 9: ENTRY PRICE CALCULATION & SLIPPAGE TOLERANCE
   // =========================================================================
-  const entryTargetPrice = price;
-  const entryZoneMin = Math.round((isLong ? price * 0.9985 : price * 0.9995) * 100) / 100;
-  const entryZoneMax = Math.round((isLong ? price * 1.0005 : price * 1.0015) * 100) / 100;
+  let entryTargetPrice = price;
+  let entryZoneMin = Math.round((isLong ? price * 0.9985 : price * 0.9995) * 100) / 100;
+  let entryZoneMax = Math.round((isLong ? price * 1.0005 : price * 1.0015) * 100) / 100;
   const stage9Passed = !pipelineHalted && entryTargetPrice > 0;
 
   stages.push({
@@ -452,7 +486,21 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   // Strictly empirical calibrated probability (null if unverified or insufficient OOS data)
   const isCalibrationVerified = analysis?.calibratedMetadata?.isCalibrationVerified ?? false;
   const rawCalibratedWinProb = analysis?.calibratedMetadata?.calibratedWinProbability ?? analysis?.calibratedWinProbability ?? null;
-  const winProb = (isCalibrationVerified && rawCalibratedWinProb !== null) ? rawCalibratedWinProb : null;
+  const calibratedMetadata = analysis?.calibratedMetadata;
+  const probabilityConfidenceInterval = calibratedMetadata?.confidenceInterval ?? null;
+  const probabilityCiWidth = calibratedMetadata?.confidenceIntervalWidth ?? null;
+  const isProbabilityEvidenceSufficient =
+    calibratedMetadata?.dataSufficient === true &&
+    probabilityConfidenceInterval !== null &&
+    probabilityConfidenceInterval.lowerBound >= 0.55 &&
+    probabilityCiWidth !== null &&
+    probabilityCiWidth <= 0.20 &&
+    calibratedMetadata.expectedCalibrationError !== null &&
+    calibratedMetadata.expectedCalibrationError <= 0.10 &&
+    calibratedMetadata.oosSampleSize >= calibratedMetadata.requiredOosSampleSize;
+  const winProb = (isCalibrationVerified && isProbabilityEvidenceSufficient && rawCalibratedWinProb !== null)
+    ? rawCalibratedWinProb
+    : null;
   const lossProb = winProb !== null ? Math.round((1 - winProb) * 100) / 100 : null;
 
   // Leverage & Margin estimation for EV calculation
@@ -483,7 +531,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   const isTqsTradeWorthy = analysis?.calibratedMetadata?.tradeQualityScore ? analysis.calibratedMetadata.tradeQualityScore.isTradeWorthy : true;
   const isEdgeProven = isCalibrationVerified && isWinProbQualified && isEvPositive && !isSegmentExpectancyNegative && isTqsTradeWorthy;
   const stage12Passed = !pipelineHalted && isEdgeProven;
-  const tqsScore = analysis?.calibratedMetadata?.tradeQualityScore?.totalScore ?? (confScore ? Math.round(confScore * 20) : 85);
+  const tqsScore = analysis?.calibratedMetadata?.tradeQualityScore?.totalScore ?? 0;
 
   stages.push({
     id: 'STAGE_12_EXPECTED_VALUE',
@@ -493,7 +541,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     status: pipelineHalted ? 'SKIPPED' : stage12Passed ? 'PASSED' : 'FAILED',
     value: winProb !== null
       ? `Trade Quality: ${tqsScore}/100 | Calibrated Win Probability: ${(winProb * 100).toFixed(1)}% | Expected Value: ${expectedR > 0 ? '+' : ''}${expectedR.toFixed(2)}R (+$${(expectedValueUsd ?? 0).toFixed(2)})`
-      : 'احتمال کالیبره‌شده: UNKNOWN / در انتظار داده‌های مستقل OOS',
+      : 'احتمال کالیبره‌شده یا بازه اطمینان OOS معتبر نیست؛ ورود مسدود است.',
     threshold: `EV > ۰ و امید ریاضی مثبت و TQS >= ۶۵ و احتمال کالیبره‌شده >= ${minWinProbability}٪`,
     reasonFa: stage12Passed
       ? `معامله دارای برتری آماری کالیبره‌شده با امید ریاضی مثبت (+$${(expectedValueUsd ?? 0).toFixed(2)}) و TQS قابل قبول است.`
@@ -555,132 +603,195 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   // =========================================================================
   // 91-95. META-MODEL, ENSEMBLE PRUNING, DISAGREEMENT & STABILITY GATES
   // =========================================================================
-  const rawRegime = (analysis?.marketRegime as any) || 'TREND';
+  const rawRegime = analysis?.marketRegime;
+  if (!rawRegime) {
+    throw new Error('Meta-model cannot run without a classified market regime.');
+  }
+  const bayesSetupType = analysis?.setupContext?.setupType;
+  const bayesTimeframe = analysis?.timeframe;
+  const bayesObi = analysis?.realObiData?.obi;
+  const bayesRsi = analysis?.rsi;
+  if (
+    !bayesSetupType ||
+    !bayesTimeframe ||
+    !Number.isFinite(bayesObi) ||
+    !Number.isFinite(volPct) ||
+    !Number.isFinite(bayesRsi) ||
+    !analysis?.candles?.length
+  ) {
+    throw new Error('Meta-model requires live setup, timeframe, order-flow, volatility, RSI, and candle inputs.');
+  }
   const allDatasetPreds = centralTradeDatasetService.getAllPredictions();
   const resolvedPreds = allDatasetPreds.filter(p => p.outcome === 'WIN' || p.outcome === 'LOSS');
   const totalResolved = resolvedPreds.length;
 
   // Real Bayesian Inference
   const bayesInfer = realBayesianEngine.inferPosterior({
-    setupType: analysis?.setupContext?.setupType || 'Pullback',
+    setupType: bayesSetupType,
     marketRegime: rawRegime,
-    timeframe: (analysis?.timeframe as any) || '15m',
+    timeframe: bayesTimeframe,
     direction: resolvedDir,
-    obi: analysis?.obi ?? 0,
-    candles: analysis?.candles || [],
-    volatilityPct: volPct ?? 1.4,
-    rsi: analysis?.rsi ?? 50
+    obi: bayesObi,
+    candles: analysis.candles,
+    volatilityPct: volPct,
+    rsi: bayesRsi
   });
 
   // Real GARCH Evaluation
-  const garchFit = realGarchEngine.fitAndForecast(analysis?.candles || []);
+  const garchFit = realGarchEngine.fitAndForecast(analysis.candles);
 
-  const isM1Calibrated = winProb !== null && totalResolved >= 15;
+  const isM1Calibrated = winProb !== null;
   const isM2Calibrated = bayesInfer.status === 'CALIBRATED' && bayesInfer.posteriorProbability !== null;
-  const isM3Valid = Boolean(reversalPred?.reversalProbability && totalResolved >= 20);
-  const isM4Calibrated = garchFit.status === 'AVAILABLE' && garchFit.isStationary;
-
-  const rawEnsembleModels = [
+  const classifyHealth = (
+    calibrated: boolean,
+    sampleSize: number,
+    oosPrecisionPct: number | null
+  ): MetaModelHealthState => {
+    if (!calibrated || oosPrecisionPct === null || oosPrecisionPct < 50 || sampleSize < 15) return 'SUSPENDED';
+    if (oosPrecisionPct < 55) return 'DEGRADED';
+    return sampleSize < 35 ? 'DEGRADED' : 'HEALTHY';
+  };
+  const internalEnsembleModels = [
     {
       modelId: 'M1_CENTRAL',
       nameFa: 'مدل کالیبراسیون مرکزی (Platt Scaling)',
-      sampleSize: totalResolved,
-      oosPrecisionPct: isM1Calibrated ? (winProb! * 100) : null,
-      regimeAccuracyPct: isM1Calibrated ? Math.round(winProb! * 100) : null,
+      sampleSize: analysis.calibratedMetadata?.oosSampleSize ?? totalResolved,
+      oosPrecisionPct: isM1Calibrated && analysis.calibratedMetadata
+        ? analysis.calibratedMetadata.outOfSamplePrecision * 100
+        : null,
+      regimeAccuracyPct: null,
       baseWeight: isM1Calibrated ? 0.35 : 0.0,
+      healthState: classifyHealth(
+        isM1Calibrated,
+        analysis.calibratedMetadata?.oosSampleSize ?? totalResolved,
+        isM1Calibrated && analysis.calibratedMetadata
+          ? analysis.calibratedMetadata.outOfSamplePrecision * 100
+          : null
+      ),
     },
     {
       modelId: 'M2_BAYESIAN',
       nameFa: 'مدل استنتاج بیزی خرد',
       sampleSize: bayesInfer.sampleSize,
-      oosPrecisionPct: isM2Calibrated ? Math.round(bayesInfer.posteriorProbability! * 100) : null,
-      regimeAccuracyPct: isM2Calibrated && bayesInfer.calibrationMetrics.oosAccuracyPct !== null ? bayesInfer.calibrationMetrics.oosAccuracyPct : null,
+      oosPrecisionPct: isM2Calibrated ? bayesInfer.calibrationMetrics.oosAccuracyPct : null,
+      regimeAccuracyPct: null,
       baseWeight: isM2Calibrated ? 0.25 : 0.0,
+      healthState: classifyHealth(
+        isM2Calibrated,
+        bayesInfer.sampleSize,
+        isM2Calibrated ? bayesInfer.calibrationMetrics.oosAccuracyPct : null
+      ),
     },
     {
       modelId: 'M3_PATTERN',
       nameFa: 'مدل واگرایی و شباهت الگوها',
       sampleSize: totalResolved,
-      oosPrecisionPct: isM3Valid ? Math.round(reversalPred.reversalProbability) : null,
-      regimeAccuracyPct: isM3Valid ? (rawRegime === 'RANGE' ? 65.0 : 50.0) : null,
-      baseWeight: isM3Valid ? 0.20 : 0.0,
+      oosPrecisionPct: null,
+      regimeAccuracyPct: null,
+      baseWeight: 0,
+      healthState: 'SUSPENDED' as const,
     },
     {
       modelId: 'M4_GARCH',
       nameFa: 'مدل پارامتری نوسانات GARCH',
       sampleSize: garchFit.sampleSize,
-      oosPrecisionPct: isM4Calibrated && garchFit.oosForecastMape !== null ? Math.round(100 - Math.min(100, garchFit.oosForecastMape)) : null,
-      regimeAccuracyPct: isM4Calibrated ? 70.0 : null,
-      baseWeight: isM4Calibrated ? 0.20 : 0.0,
+      oosPrecisionPct: null,
+      regimeAccuracyPct: null,
+      baseWeight: 0,
+      healthState: 'SUSPENDED' as const,
     }
   ];
+  const rawEnsembleModels = multiBrainReport
+    ? multiBrainReport.independentModels.map(model => ({
+        modelId: model.modelId,
+        nameFa: model.nameFa,
+        sampleSize: model.sampleSize,
+        oosPrecisionPct: model.historicalPrecisionPct,
+        regimeAccuracyPct: model.regimePerformancePct,
+        baseWeight: model.effectiveWeight,
+        healthState: model.healthState,
+      }))
+    : internalEnsembleModels;
+  const modelPredictions: MetaLearnerInputFeatures['modelPredictions'] = multiBrainReport
+    ? Object.fromEntries(multiBrainReport.independentModels.map(model => [
+        model.modelId,
+        {
+          direction: model.prediction === 'BULLISH'
+            ? 'LONG' as const
+            : model.prediction === 'BEARISH'
+            ? 'SHORT' as const
+            : 'NEUTRAL' as const,
+          prob: model.rawProbabilityPct,
+          healthState: model.healthState,
+        },
+      ]))
+    : {
+        M1_CENTRAL: { direction: resolvedDir, prob: isM1Calibrated ? winProb! * 100 : null, healthState: internalEnsembleModels[0].healthState },
+        M2_BAYESIAN: { direction: resolvedDir, prob: isM2Calibrated && bayesInfer.posteriorProbability !== null ? bayesInfer.posteriorProbability * 100 : null, healthState: internalEnsembleModels[1].healthState },
+        M3_PATTERN: { direction: 'NEUTRAL', prob: null, healthState: 'SUSPENDED' },
+        M4_GARCH: { direction: 'NEUTRAL', prob: null, healthState: 'SUSPENDED' },
+      };
 
   // 91. Dynamic Ensemble Pruning
   const pruningReport = metaModelEnsembleEngine.evaluateDynamicEnsembleWeights(rawRegime, rawEnsembleModels);
 
   // 93. Model Disagreement Evaluation (Using real empirical confidences, 0 if uncalibrated)
-  const modelsForDisagreement = [
-    {
-      modelId: 'M1_CENTRAL',
-      modelNameFa: 'مدل کالیبراسیون مرکزی',
-      direction: resolvedDir,
-      confidencePct: isM1Calibrated ? Math.round(winProb! * 100) : 0,
-      effectiveWeightPct: (pruningReport.models.find(m => m.modelId === 'M1_CENTRAL')?.effectiveWeight || 0.0) * 100,
-    },
-    {
-      modelId: 'M2_BAYESIAN',
-      modelNameFa: 'مدل بیزی خرد',
-      direction: resolvedDir,
-      confidencePct: isM2Calibrated ? Math.round(bayesInfer.posteriorProbability! * 100) : 0,
-      effectiveWeightPct: (pruningReport.models.find(m => m.modelId === 'M2_BAYESIAN')?.effectiveWeight || 0.0) * 100,
-    },
-    {
-      modelId: 'M3_PATTERN',
-      modelNameFa: 'مدل الگوها',
-      direction: isM3Valid && reversalPred?.reversalProbability && reversalPred.reversalProbability >= 70
-        ? (isLong ? 'SHORT' : 'LONG')
-        : resolvedDir,
-      confidencePct: isM3Valid && reversalPred?.reversalProbability ? Math.round(reversalPred.reversalProbability) : 0,
-      effectiveWeightPct: (pruningReport.models.find(m => m.modelId === 'M3_PATTERN')?.effectiveWeight || 0.0) * 100,
-    },
-    {
-      modelId: 'M4_GARCH',
-      modelNameFa: 'مدل نوسانات GARCH',
-      direction: volPct && volPct > 4.0 ? 'NEUTRAL' : resolvedDir,
-      confidencePct: isM4Calibrated ? 70 : 0,
-      effectiveWeightPct: (pruningReport.models.find(m => m.modelId === 'M4_GARCH')?.effectiveWeight || 0.0) * 100,
-    }
-  ];
-  const disagreementReport = metaModelEnsembleEngine.evaluateModelDisagreement(modelsForDisagreement as any);
+  const modelsForDisagreement = pruningReport.models.map(model => {
+    const prediction = modelPredictions[model.modelId];
+    return {
+      modelId: model.modelId,
+      modelNameFa: model.nameFa,
+      direction: prediction?.direction ?? 'NEUTRAL',
+      confidencePct: prediction?.prob ?? null,
+      effectiveWeightPct: model.effectiveWeight * 100,
+    };
+  });
+  const calculatedDisagreement = metaModelEnsembleEngine.evaluateModelDisagreement(modelsForDisagreement);
+  const disagreementReport = multiBrainReport?.modelDisagreement.vetoTriggered
+    ? {
+        ...calculatedDisagreement,
+        vetoTriggered: true,
+        verdictFa: multiBrainReport.modelDisagreement.verdictFa,
+      }
+    : calculatedDisagreement;
 
   // 92. Final Meta-Model Run (Zero fabricated probabilities)
   const metaLearnerInputs: MetaLearnerInputFeatures = {
-    modelPredictions: {
-      M1_CENTRAL: { direction: resolvedDir, prob: isM1Calibrated ? winProb! * 100 : null },
-      M2_BAYESIAN: { direction: resolvedDir, prob: isM2Calibrated && bayesInfer.posteriorProbability !== null ? (bayesInfer.posteriorProbability * 100) : null },
-      M3_PATTERN: {
-        direction: isM3Valid && reversalPred?.reversalProbability && reversalPred.reversalProbability >= 70 ? (isLong ? 'SHORT' : 'LONG') : resolvedDir,
-        prob: isM3Valid && reversalPred?.reversalProbability ? Math.round(reversalPred.reversalProbability) : null,
-      },
-      M4_GARCH: { direction: volPct && volPct > 4.0 ? 'NEUTRAL' : resolvedDir, prob: isM4Calibrated ? 65 : null },
-    },
+    modelPredictions,
     disagreementIndex: disagreementReport.disagreementIndex,
     marketRegime: rawRegime,
-    volatilityPct: volPct ?? 2.0,
     orderBookFeature: {
-      obi: analysis?.realObiData?.obi ?? 0,
-      bidDepthUsd: analysis?.realObiData?.bidDepthUsd ?? 500000,
-      askDepthUsd: analysis?.realObiData?.askDepthUsd ?? 500000,
+      obi: analysis?.realObiData?.obi ?? null,
+      bidDepthUsd: analysis?.realObiData?.bidDepthUsd ?? null,
+      askDepthUsd: analysis?.realObiData?.askDepthUsd ?? null,
+    },
+    cvdFeature: { cvdDelta: analysis?.cvdDelta ?? null },
+    oiFeature: {
+      oiValue: Number.isFinite(analysis?.oi) ? analysis.oi : null,
+      oiChangePct: analysis?.cvdOiMatrix?.openInterestChangePct ?? null,
+    },
+    fundingFeature: {
+      fundingRate: analysis?.cvdOiMatrix?.fundingRatePct ??
+        (Number.isFinite(analysis?.fundingRate) ? analysis.fundingRate! : null),
     },
     momentumFeature: {
-      rsi: 50,
-      adx: adx ?? 25,
+      rsi: analysis?.rsi ?? null,
+      adx: analysis?.adx ?? null,
     },
-    spreadBps,
-    predictionStabilityScore: 85,
-    latencyMs: 45,
+    regimeProbabilities: analysis?.regimeClassification?.regimeProbabilities,
+    setupType: analysis?.setupContext?.setupType ?? null,
+    spreadBps: analysis?.canonicalSnapshot?.basisSpreadBps ?? null,
+    volatilityPct: analysis?.volatilityPct ?? null,
+    latencyMs: analysis?.realObiData?.latencyMs ?? null,
+    calibrationErrorPct: analysis?.calibratedMetadata?.expectedCalibrationError == null
+      ? null
+      : analysis.calibratedMetadata.expectedCalibrationError * 100,
+    signalAgeMs: sourceTimestampMs === null ? null : Math.max(0, timestampMs - sourceTimestampMs),
   };
   const metaLearnerOutput = metaModelEnsembleEngine.runMetaLearner(metaLearnerInputs, disagreementReport, pruningReport);
+  if (metaLearnerOutput.expectedReturnR !== null && Number.isFinite(riskUsd) && riskUsd > 0) {
+    metaLearnerOutput.expectedReturnUsd = Math.round(metaLearnerOutput.expectedReturnR * riskUsd * 100) / 100;
+  }
 
   // 94. Prediction Stability Gate
   const predictionStability = metaModelEnsembleEngine.evaluatePredictionStability(
@@ -689,7 +800,11 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   );
 
   // 95. Temporal Entry Stability
-  const isStructuralTriggerConfirmed = Boolean(analysis?.setupContext?.triggerCondition || (analysis?.smcOrderBlock && hasSmc));
+  const isStructuralTriggerConfirmed =
+    analysis?.setupContext?.isTriggerConfirmed === true &&
+    analysis.setupContext.eventSequence?.some(event =>
+      event.stage === 'TRIGGER_CONFIRMATION' && event.passed
+    ) === true;
   const temporalStability = metaModelEnsembleEngine.evaluateTemporalEntryStability(
     tqsScore,
     resolvedDir,
@@ -700,7 +815,71 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
   // =========================================================================
   // STAGE 14: EXECUTION GATE & IMMUTABLE CONTRACT MINTING
   // =========================================================================
-  const isEnsembleApproved = !disagreementReport.vetoTriggered && !predictionStability.isEntryBlockedByInstability && temporalStability.isTemporalStabilityVerified;
+  let opportunitySurface = entryOpportunityAndTiming.evaluateOpportunitySurface({
+    currentPrice: price,
+    direction: metaLearnerOutput.direction,
+    atr: analysis.atr,
+    stopPrice: stopLossPrice,
+    targetPrice: tp1Price,
+    calibratedProbabilityPct: metaLearnerOutput.calibratedProbabilityPct,
+    expectedMaeR: metaLearnerOutput.expectedMaeR,
+    expectedMfeR: metaLearnerOutput.expectedMfeR,
+    expectedDurationSeconds: metaLearnerOutput.expectedDurationSeconds,
+    spreadBps: analysis?.canonicalSnapshot?.basisSpreadBps ?? null,
+    bidDepthUsd: analysis?.realObiData?.bidDepthUsd ?? null,
+    askDepthUsd: analysis?.realObiData?.askDepthUsd ?? null,
+    orderNotionalUsd: notionalUsd,
+    isTriggerConfirmed: stage8Passed && temporalStability.isStructuralTriggerConfirmed,
+    isModelEnsembleHealthy: hasHealthyMultiBrainEnsemble,
+    fillProbabilityPct: analysis?.fillProbabilityPct ?? null,
+  });
+  if (!hasHealthyMultiBrainEnsemble) {
+    const blocker = !hasCurrentMultiBrainReport
+      ? 'گزارش زنده و تازهٔ MultiBrain به Meta-Hunter تزریق نشده است؛ اجرای معامله مسدود شد.'
+      : 'کمتر از دو Brain سالم و دارای احتمال معتبر برای Ensemble موجود است؛ اجرا مسدود شد.';
+    opportunitySurface = {
+      ...opportunitySurface,
+      mode: 'HUNT',
+      nearMissReasonFa: `${opportunitySurface.readinessPct}% READY — ${blocker}`,
+    };
+  }
+  if (opportunitySurface.optimalEntryPrice !== null && opportunitySurface.entryZone !== null) {
+    entryTargetPrice = opportunitySurface.optimalEntryPrice;
+    entryZoneMin = opportunitySurface.entryZone.min;
+    entryZoneMax = opportunitySurface.entryZone.max;
+  }
+  const entryPriceStage = stages.find(stage => stage.id === 'STAGE_9_ENTRY_PRICE');
+  if (opportunitySurface.mode !== 'EXECUTE') {
+    const reasonFa = opportunitySurface.nearMissReasonFa ??
+      'قیمت به نقطه ورود بهینه و شرایط اجرایی کامل نرسیده است.';
+    if (entryPriceStage) {
+      entryPriceStage.passed = false;
+      entryPriceStage.status = 'FAILED';
+      entryPriceStage.value = `حالت ${opportunitySurface.mode} | Entry: ${opportunitySurface.optimalEntryPrice ?? 'نامشخص'}`;
+      entryPriceStage.reasonFa = reasonFa;
+    }
+    if (!hasHealthyMultiBrainEnsemble) {
+      const brainReportBlocker = !hasCurrentMultiBrainReport
+        ? 'گزارش زنده و تازهٔ MultiBrain به Meta-Hunter تزریق نشده است؛ اجرای معامله مسدود شد.'
+        : 'کمتر از دو Brain سالم و دارای احتمال معتبر برای Ensemble موجود است؛ اجرا مسدود شد.';
+      if (!rejectionReasonsFa.includes(brainReportBlocker)) rejectionReasonsFa.push(brainReportBlocker);
+      prerequisitesToArmFa.push('تزریق پیش‌بینی زندهٔ Brainهای سالم و معتبر به Meta-Hunter');
+    }
+    if (!rejectionReasonsFa.includes(reasonFa)) rejectionReasonsFa.push(reasonFa);
+    if (!prerequisitesToArmFa.includes(reasonFa)) prerequisitesToArmFa.push(reasonFa);
+    if (!pipelineHalted) {
+      pipelineHalted = true;
+      activeStage = 'STAGE_9_ENTRY_PRICE';
+    }
+  } else if (entryPriceStage) {
+    entryPriceStage.value = `$${entryTargetPrice.toFixed(2)} [${entryZoneMin.toFixed(2)}-${entryZoneMax.toFixed(2)}]`;
+    entryPriceStage.reasonFa = 'قیمت در محدوده بهینه، احتمال Fill معتبر و Trigger واقعی تایید شدند.';
+  }
+  const isEnsembleApproved = hasHealthyMultiBrainEnsemble &&
+    opportunitySurface.mode === 'EXECUTE' &&
+    !disagreementReport.vetoTriggered &&
+    !predictionStability.isEntryBlockedByInstability &&
+    temporalStability.isTemporalStabilityVerified;
   const allStagesPassed = stages.every((s) => s.passed) && isEnsembleApproved;
   const stage14Passed = allStagesPassed;
 
@@ -714,7 +893,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     threshold: 'قبولی ۱۰۰٪ تمام ۱۳ لایه قبلی و فیلترهای فرامدل/پایداری',
     reasonFa: stage14Passed
       ? 'تمام ۱۴ مرحله پایپ‌لاین و فیلترهای پایداری فرامدل با موفقیت تایید شدند. قرارداد معامله تولید و غیرقابل‌تغییر شد.'
-      : 'ورود به معامله مسدود شد: شرایط برتری آماری یا پایداری فرامدل به صورت کامل محقق نگردید.',
+      : `ورود مسدود شد (${opportunitySurface.mode}): ${opportunitySurface.nearMissReasonFa ?? 'شرایط برتری آماری، سلامت مدل یا پایداری کامل نیست.'}`,
   });
 
   if (!isEnsembleApproved) {
@@ -881,7 +1060,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     : 'نبود برتری آماری قطعی (Edge) در وضعیت فعلی بازار';
 
   centralTradeDatasetService.recordPrediction(
-    analysis,
+    { ...analysis, modelAgreementPct: 100 - disagreementReport.disagreementIndex },
     resolvedDir,
     traceableIds,
     stage14Passed ? 'EXECUTED_FILLED' : 'DECISION_REJECTED',
@@ -900,15 +1079,20 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     exchangeTimestamp: analysis?.canonicalSnapshot?.timestampUtc || timestampMs,
   };
 
+  const selectedEntrySurfacePoint = opportunitySurface.points.find(point => point.entryPrice === entryTargetPrice);
   const entryCandidate: EntryCandidate = {
     candidateType: 'PULLBACK_ENTRY',
     entryZone: { min: entryZoneMin, max: entryZoneMax, target: entryTargetPrice },
     invalidationPrice,
     targetPrice: tp1Price,
-    expectedMovePct: ((Math.abs(tp1Price - price) / price) * 100),
-    spreadBps,
-    slippagePct: 0.02,
-    riskRewardRatio: rrTp1,
+    expectedMovePct: ((Math.abs(tp1Price - entryTargetPrice) / entryTargetPrice) * 100),
+    spreadBps: analysis?.canonicalSnapshot?.basisSpreadBps ?? null,
+    slippagePct: selectedEntrySurfacePoint?.slippageBps == null
+      ? null
+      : selectedEntrySurfacePoint.slippageBps / 100,
+    riskRewardRatio: Math.abs(entryTargetPrice - stopLossPrice) > 0
+      ? Math.abs(tp1Price - entryTargetPrice) / Math.abs(entryTargetPrice - stopLossPrice)
+      : 0,
     probability: winProb,
     expectedValueUsd,
     timeValidityMs: 300000, // 5 minute TTL
@@ -994,11 +1178,12 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     pipelineRejections: rejectionReasonsFa,
     riskGovernorApproved: stage13Passed,
     riskGovernorBlockers: !stage13Passed ? ['موجودی ناکافی کیف پول برای تامین حداقل مارجین ایمن معامله'] : [],
-    price,
+    price: entryTargetPrice,
     stopLossPrice,
     takeProfitPrice: tp1Price,
     allocatedRiskUsd: riskUsd,
     modelVersion: 'v4.5-meta-ensemble',
+    opportunitySurface,
   });
 
   canonicalDecision.masterDecision = masterDecisionObject;
@@ -1019,6 +1204,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
       auditTrailDraft,
       canonicalDecision,
       masterDecision: masterDecisionObject,
+      opportunitySurface,
       waitReasonFa: '',
       prerequisitesToArmFa: [],
       evaluatedAtIso: timestampIso,
@@ -1041,6 +1227,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     auditTrailDraft,
     canonicalDecision,
     masterDecision: masterDecisionObject,
+    opportunitySurface,
     waitReasonFa: defaultWaitReason || masterDecisionObject.masterVerdictFa,
     prerequisitesToArmFa: prerequisitesToArmFa.length > 0 ? prerequisitesToArmFa : ['تثبیت الگو و حصول اطمینان از امید ریاضی مثبت معامله'],
     evaluatedAtIso: timestampIso,

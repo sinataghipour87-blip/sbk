@@ -52,9 +52,22 @@ export const MtfStructuralWidget: React.FC<MtfStructuralWidgetProps> = ({ analys
   }, [analysis]);
 
   // ۳۸. ماتریس رژیم چند تایم‌فریمه (Multi-Timeframe Regime Matrix)
-  const mtfRegimes: MultiTimeframeRegimeReport = useMemo(() => {
-    const candles = analysis?.rawCandles || analysis?.candles || [];
-    return classifyMultiTimeframeRegimes(candles, analysis?.price ?? 88450, analysis?.adx ?? 24, analysis?.atr ?? 420);
+  const mtfRegimes: MultiTimeframeRegimeReport | null = useMemo(() => {
+    const candlesByTimeframe = analysis?.htfCandles;
+    if (
+      !candlesByTimeframe ||
+      (['5m', '15m', '1h', '4h'] as const).some(timeframe => (candlesByTimeframe[timeframe]?.length ?? 0) < 300) ||
+      !analysis?.price
+    ) return null;
+    return classifyMultiTimeframeRegimes(
+      {
+        '5m': candlesByTimeframe['5m'],
+        '15m': candlesByTimeframe['15m'],
+        '1h': candlesByTimeframe['1h'],
+        '4h': candlesByTimeframe['4h'],
+      },
+      analysis.price
+    );
   }, [analysis]);
 
   // تعیین استایل دکمه سناریو
@@ -117,6 +130,8 @@ export const MtfStructuralWidget: React.FC<MtfStructuralWidgetProps> = ({ analys
 
       {/* ۳۸. بخش ماتریس رژیم چندتایم‌فریمه (Multi-Timeframe Regime Matrix) */}
       <div className="bg-gradient-to-r from-slate-950 via-cyan-950/30 to-slate-950 border border-cyan-800/40 rounded-xl p-3 flex flex-col gap-2.5">
+        {mtfRegimes ? (
+          <>
         <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
           <div className="flex items-center gap-2">
             <Boxes className="w-4 h-4 text-cyan-400" />
@@ -134,7 +149,9 @@ export const MtfStructuralWidget: React.FC<MtfStructuralWidgetProps> = ({ analys
               <div key={tfKey} className="bg-slate-900/90 border border-slate-800 rounded-lg p-2.5 flex flex-col justify-between">
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-mono text-xs font-bold text-cyan-300 uppercase">{tfKey}</span>
-                  <span className="text-[9px] font-mono text-slate-400">{item.confidencePct}% تایید</span>
+                  <span className="text-[9px] font-mono text-slate-400">
+                    {item.confidencePct}% · {item.probabilityModelValidation.status === 'CALIBRATED' ? 'OOS' : 'خام'}
+                  </span>
                 </div>
                 <div className="text-xs font-black text-amber-300 font-mono my-0.5">
                   {item.regime}
@@ -159,6 +176,12 @@ export const MtfStructuralWidget: React.FC<MtfStructuralWidgetProps> = ({ analys
             <span className="block text-cyan-300 font-medium mt-0.5">دستورالعمل اجرا: {mtfRegimes.actionGuidanceFa}</span>
           </div>
         </div>
+          </>
+        ) : (
+          <p className="text-xs text-amber-300">
+            ماتریس چندتایم‌فریمه تا دریافت حداقل ۳۰۰ کندل واقعی و جداگانه برای 5m، 15m، 1h و 4h در وضعیت WAIT است.
+          </p>
+        )}
       </div>
 
       {/* بخش حل تداخل پنهان و مجوز اقدام */}

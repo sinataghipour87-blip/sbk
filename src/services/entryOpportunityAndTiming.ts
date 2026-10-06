@@ -1,4 +1,9 @@
-import { Candle, EntryOpportunityReport, OpportunityLifecycle } from '../types/trading';
+import {
+  Candle,
+  EntryOpportunityReport,
+  EntryOpportunitySurfaceReport,
+  OpportunityLifecycle,
+} from '../types/trading';
 
 /**
  * 🎯 موتور مستقل ردیاب فرصت‌های ورود (Entry Opportunity Detector) - قانون ۱۷
@@ -8,6 +13,164 @@ export class EntryOpportunityAndTimingService {
   private static instance: EntryOpportunityAndTimingService;
 
   private constructor() {}
+
+  public evaluateOpportunitySurface(params: {
+    currentPrice: number;
+    direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+    atr: number;
+    stopPrice: number;
+    targetPrice: number;
+    calibratedProbabilityPct: number | null;
+    expectedMaeR: number | null;
+    expectedMfeR: number | null;
+    expectedDurationSeconds: number | null;
+    spreadBps: number | null;
+    bidDepthUsd: number | null;
+    askDepthUsd: number | null;
+    orderNotionalUsd: number;
+    isTriggerConfirmed: boolean;
+    isModelEnsembleHealthy: boolean;
+    fillProbabilityPct?: number | null;
+  }): EntryOpportunitySurfaceReport {
+    const {
+      currentPrice, direction, atr, stopPrice, targetPrice, calibratedProbabilityPct,
+      expectedMaeR, expectedMfeR, expectedDurationSeconds, spreadBps, bidDepthUsd,
+      askDepthUsd, orderNotionalUsd, isTriggerConfirmed,
+      isModelEnsembleHealthy,
+      fillProbabilityPct = null,
+    } = params;
+    if (
+      !Number.isFinite(currentPrice) || currentPrice <= 0 ||
+      !Number.isFinite(atr) || atr <= 0 ||
+      !Number.isFinite(orderNotionalUsd) || orderNotionalUsd <= 0 ||
+      !Number.isFinite(stopPrice) || stopPrice <= 0 ||
+      !Number.isFinite(targetPrice) || targetPrice <= 0
+    ) {
+      throw new Error('Opportunity surface requires validated live price, ATR, stop, target, and order notional.');
+    }
+    const validMarketInputs =
+      Number.isFinite(currentPrice) && currentPrice > 0 &&
+      Number.isFinite(atr) && atr > 0 &&
+      Number.isFinite(orderNotionalUsd) && orderNotionalUsd > 0 &&
+      spreadBps !== null && Number.isFinite(spreadBps) && spreadBps >= 0;
+    const points = Array.from({ length: 20 }, (_, index) => {
+      const offset = ((index / 19) * 1.2 - 0.6) * atr;
+      const entryPrice = Math.round((currentPrice + offset) * 100) / 100;
+      const stopDistance = Math.abs(entryPrice - stopPrice);
+      const reward = direction === 'LONG'
+        ? targetPrice - entryPrice
+        : entryPrice - targetPrice;
+      const liquidityUsd = direction === 'LONG' ? askDepthUsd : bidDepthUsd;
+      const hasLiquidity = typeof liquidityUsd === 'number' && Number.isFinite(liquidityUsd) && liquidityUsd > 0;
+      const slippageBps = validMarketInputs && hasLiquidity
+        ? (spreadBps! / 2) + (orderNotionalUsd / liquidityUsd!) * 10000
+        : null;
+      const hasProbability = calibratedProbabilityPct !== null &&
+        Number.isFinite(calibratedProbabilityPct) &&
+        calibratedProbabilityPct > 0 && calibratedProbabilityPct <= 100;
+      const hasValidRiskReward = direction !== 'NEUTRAL' &&
+        Number.isFinite(stopDistance) && stopDistance > 0 &&
+        Number.isFinite(reward) && reward > 0;
+      const costR = slippageBps !== null ? (slippageBps / 10000) * currentPrice / stopDistance : null;
+      const expectedValueR = hasProbability && hasValidRiskReward && costR !== null
+        ? (calibratedProbabilityPct! / 100) * (reward / stopDistance) -
+          (1 - calibratedProbabilityPct! / 100) - costR
+        : null;
+      return {
+        entryPrice,
+        calibratedProbabilityPct: hasProbability ? calibratedProbabilityPct : null,
+        expectedValueR: expectedValueR === null ? null : Math.round(expectedValueR * 1000) / 1000,
+        expectedMaeR,
+        expectedMfeR,
+        expectedDurationSeconds,
+        fillProbabilityPct: fillProbabilityPct !== null && Number.isFinite(fillProbabilityPct) &&
+          fillProbabilityPct >= 0 && fillProbabilityPct <= 100 ? fillProbabilityPct : null,
+        slippageBps: slippageBps === null ? null : Math.round(slippageBps * 100) / 100,
+        stopDistance: hasValidRiskReward ? Math.round(stopDistance * 100) / 100 : null,
+        reward: hasValidRiskReward ? Math.round(reward * 100) / 100 : null,
+        liquidityUsd: hasLiquidity ? liquidityUsd : null,
+        qualityScore: expectedValueR === null ? null : Math.round(expectedValueR * 1000) / 1000,
+      };
+    });
+
+    const bestPoint = points
+      .filter(point => point.qualityScore !== null && point.qualityScore > 0)
+      .reduce<typeof points[number] | null>(
+        (best, point) => best === null || point.qualityScore! > best.qualityScore! ? point : best,
+        null
+      );
+    const goodPoints = bestPoint
+      ? points.filter(point => point.qualityScore !== null && point.qualityScore! >= bestPoint.qualityScore! * 0.95)
+      : [];
+    const entryZone = goodPoints.length > 0
+      ? {
+          min: Math.min(...goodPoints.map(point => point.entryPrice)),
+          max: Math.max(...goodPoints.map(point => point.entryPrice)),
+        }
+      : null;
+    const tolerance = atr * 0.05;
+    const isPriceAtOptimalEntry = bestPoint !== null && Math.abs(currentPrice - bestPoint.entryPrice) <= tolerance;
+    const selectedPoint = isPriceAtOptimalEntry
+      ? bestPoint
+      : null;
+    const fillAvailable = selectedPoint?.fillProbabilityPct !== null &&
+      selectedPoint?.fillProbabilityPct !== undefined;
+    const hasLiveLiquidityCost = validMarketInputs &&
+      points.some(point => point.liquidityUsd !== null && point.slippageBps !== null);
+    const canExecute = direction !== 'NEUTRAL' &&
+      isModelEnsembleHealthy &&
+      validMarketInputs &&
+      selectedPoint !== null &&
+      isTriggerConfirmed &&
+      fillAvailable;
+    const mode: EntryOpportunitySurfaceReport['mode'] = canExecute
+      ? 'EXECUTE'
+      : bestPoint && calibratedProbabilityPct !== null && isModelEnsembleHealthy
+      ? 'AMBUSH'
+      : 'HUNT';
+    const readinessConditions = [
+      calibratedProbabilityPct !== null,
+      bestPoint !== null && hasLiveLiquidityCost,
+      isModelEnsembleHealthy,
+      isPriceAtOptimalEntry,
+      isTriggerConfirmed,
+      fillAvailable,
+    ];
+    const readinessPct = Math.round(
+      readinessConditions.filter(Boolean).length / readinessConditions.length * 100
+    );
+    const nearMissReasonFa = mode === 'EXECUTE'
+      ? null
+      : `${readinessPct}% READY — ${
+          calibratedProbabilityPct === null
+            ? 'WAIT FOR OOS CALIBRATION'
+            : !isModelEnsembleHealthy
+            ? 'WAIT FOR HEALTHY BRAIN ENSEMBLE'
+            : !bestPoint || !hasLiveLiquidityCost
+            ? 'WAIT FOR POSITIVE EV AND LIVE LIQUIDITY'
+            : !isPriceAtOptimalEntry
+            ? `WAIT FOR OPTIMAL ENTRY $${bestPoint.entryPrice.toFixed(2)}`
+            : !isTriggerConfirmed
+            ? 'WAIT FOR LIVE TRIGGER CONFIRMATION'
+            : !fillAvailable
+            ? 'WAIT FOR VERIFIED FILL PROBABILITY'
+            : 'WAIT FOR EXECUTION GATES'
+        }`;
+
+    return {
+      mode,
+      direction,
+      points,
+      entryZone,
+      optimalEntryPrice: bestPoint?.entryPrice ?? null,
+      isPriceAtOptimalEntry,
+      isTriggerConfirmed,
+      readinessPct,
+      nearMissReasonFa,
+      fillProbabilityAvailable: fillAvailable,
+      evaluatedAt: Date.now(),
+    };
+  }
 
   public static getInstance(): EntryOpportunityAndTimingService {
     if (!EntryOpportunityAndTimingService.instance) {

@@ -15,6 +15,7 @@ import {
   EntryCandidateType
 } from '../types/trading';
 import { runUnifiedDecisionPipeline } from './decisionPipeline';
+import { getLatestMultiBrainConsensusReport } from './multiBrainEnsemble';
 import { calculateOrderFlowFeatures } from './marketData';
 import {
   atr,
@@ -206,7 +207,7 @@ export function analyzePro(
   futuresPrices?: FuturesPrices
 ): AnalysisResult {
   // Strict Safety Guard (Item 35): If real candles are unavailable, stale, or data quality report disallows trade -> Strictly disable trading!
-  if (!candles || candles.length < 20 || dataStatus === 'DATA_UNAVAILABLE' || dataStatus === 'STALE' || (dataQualityReport && !dataQualityReport.isTradeAllowed)) {
+  if (!candles || candles.length < 300 || dataStatus === 'DATA_UNAVAILABLE' || dataStatus === 'STALE' || (dataQualityReport && !dataQualityReport.isTradeAllowed)) {
     const dummyPrice = futuresPrices?.lastPrice || (candles && candles.length > 0 ? candles[candles.length - 1][3] : 0);
     const reasonsMsg = dataQualityReport?.reasonsFa?.join(' | ') || 'فیدهای زنده بازار در دسترس نیستند یا کهنه شده‌اند';
     return {
@@ -219,7 +220,7 @@ export function analyzePro(
       stopLossPriceType: 'MARK_PRICE',
       liquidationPriceType: 'MARK_PRICE',
       sentiment,
-      action: `🛑 توقف کامل معامله (NO TRADE): ${reasonsMsg}`,
+      action: `🛑 توقف کامل معامله (NO TRADE): ${candles && candles.length < 300 ? 'حداقل ۳۰۰ کندل واقعی برای اعتبارسنجی OOS مدل رژیم لازم است.' : reasonsMsg}`,
       actionCol: '#E74C3C',
       direction: 'LONG',
       signalOk: false,
@@ -621,6 +622,9 @@ export function analyzePro(
     volatilityPct,
     adx: adxVal,
     rsi: currRsi,
+    ema20: ema20[ema20.length - 1],
+    ema50: ema50[ema50.length - 1],
+    ema200: ema200[ema200.length - 1],
     setupType,
     marketRegime,
     candles,
@@ -856,6 +860,7 @@ export function analyzePro(
     stopLossPriceType: 'MARK_PRICE',
     liquidationPriceType: 'MARK_PRICE',
     sentiment,
+    htfCandles,
     action,
     actionCol,
     direction: confDirection,
@@ -964,8 +969,18 @@ export function analyzePro(
     const cascadePrediction = predictLiquidationCascade(candles, price, liqMap, deriv, currAtr);
     const regimeClass = classifyMarketRegime(candles, price, adxVal, currAtr, bbUp, bbLow, bbMid, vwapVal, orderFlow);
     const candidateSetup: EntryCandidateType = sweepSetup?.isReversalSetupActive ? 'LIQUIDITY_SWEEP_RECLAIM' : 'PULLBACK_ENTRY';
-    const regimeEdgeMatrix = evaluateRegimeSetupEdge(candidateSetup, regimeClass.activeRegime, '15m');
+    const regimeEdgeMatrix = evaluateRegimeSetupEdge(
+      candidateSetup,
+      regimeClass.activeRegime,
+      '15m',
+      confDirection === 'SHORT' ? 'SHORT' : 'LONG'
+    );
 
+    const scoreForBias = (bias: string) => bias === 'BULLISH'
+      ? scoreLong
+      : bias === 'BEARISH'
+        ? scoreShort
+        : Math.max(scoreLong, scoreShort);
     const mtfStructuralReport = processMtfStructuralAnalysis(
       {
         '4h': htf4h === 'BULLISH' ? 'BULLISH' : (htf4h === 'BEARISH' ? 'BEARISH' : 'NEUTRAL'),
@@ -975,11 +990,11 @@ export function analyzePro(
         '1m': htf1m === 'BULLISH' ? 'BULLISH' : (htf1m === 'BEARISH' ? 'BEARISH' : 'NEUTRAL'),
       },
       {
-        '4h': scoreLong > scoreShort ? 82 : 45,
-        '1h': scoreLong > scoreShort ? 78 : 48,
-        '15m': scoreLong > scoreShort ? 72 : 52,
-        '5m': scoreLong > scoreShort ? 65 : 55,
-        '1m': scoreLong > scoreShort ? 60 : 60,
+        '4h': scoreForBias(htf4h),
+        '1h': scoreForBias(htf1h),
+        '15m': scoreForBias(mtf15m),
+        '5m': scoreForBias(htf5m),
+        '1m': scoreForBias(htf1m),
       }
     );
 
@@ -1002,20 +1017,28 @@ export function analyzePro(
       baseResult.actionCol = 'text-amber-400';
     }
 
-    baseResult.marketRegime = regimeClass.regimeFa;
-  } catch {}
+    baseResult.marketRegime = regimeClass.activeRegime;
+  } catch (error) {
+    throw new Error('Market regime analysis failed; trade analysis is halted.', { cause: error });
+  }
 
   try {
     const pipeline = runUnifiedDecisionPipeline({
       analysis: baseResult,
       targetDirection: confDirection,
+      multiBrainReport: getLatestMultiBrainConsensusReport(
+        baseResult.price,
+        baseResult.canonicalSnapshot?.timestampUtc ?? baseResult.realObiData?.timestamp ?? null
+      ),
       balance: balance || 1000,
       userLeverage: leverage,
       minWinProbability: 68,
       isAutoTrade: false,
     });
     baseResult.decisionPipeline = pipeline;
-  } catch {}
+  } catch (error) {
+    throw new Error('Unified decision pipeline failed; analysis is halted.', { cause: error });
+  }
 
   return baseResult;
 }

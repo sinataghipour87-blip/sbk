@@ -35,14 +35,15 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
   const [selectedTimeframe, setSelectedTimeframe] = useState<TradingTimeframe>('15m');
   const [selectedSetup, setSelectedSetup] = useState<EntryCandidateType>('PULLBACK_ENTRY');
 
-  const price = currentPrice > 0 ? currentPrice : (analysis?.price ?? 88450);
+  const price = currentPrice > 0 ? currentPrice : (analysis?.price ?? 0);
 
   // ۱. رده‌بندی رژیم بازار
-  const regimeData: MarketRegimeClassification = useMemo(() => {
+  const regimeData: MarketRegimeClassification | null = useMemo(() => {
     if (analysis?.regimeClassification) {
       return analysis.regimeClassification;
     }
     const candles = analysis?.rawCandles || analysis?.candles || [];
+    if (candles.length < 300 || price <= 0) return null;
     return classifyMarketRegime(
       candles,
       price,
@@ -57,9 +58,23 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
   }, [analysis, price]);
 
   // ۲. ماتریس اج ستاپ بر پایه رژیم و تایم‌فریم
-  const edgeMatrix: RegimeSetupMatrixReport = useMemo(() => {
-    return evaluateRegimeSetupEdge(selectedSetup, regimeData.activeRegime, selectedTimeframe);
-  }, [selectedSetup, regimeData.activeRegime, selectedTimeframe]);
+  const edgeMatrix: RegimeSetupMatrixReport | null = useMemo(() => {
+    if (!regimeData) return null;
+    return evaluateRegimeSetupEdge(
+      selectedSetup,
+      regimeData.activeRegime,
+      selectedTimeframe,
+      analysis?.direction ?? 'LONG'
+    );
+  }, [selectedSetup, regimeData?.activeRegime, selectedTimeframe, analysis?.direction]);
+
+  if (!regimeData || !edgeMatrix) {
+    return (
+      <div className="rounded-xl border border-amber-700/50 bg-slate-950 p-4 text-sm text-amber-300">
+        طبقه‌بند رژیم در وضعیت WAIT است: قیمت زنده و حداقل ۳۰۰ کندل واقعی برای آموزش و اعتبارسنجی OOS لازم است.
+      </div>
+    );
+  }
 
   // استایل رژیم
   const getRegimeBadgeStyle = (regime: AdvancedRegimeType) => {
@@ -122,9 +137,22 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
 
         <div className={`px-3 py-1.5 rounded-xl border text-xs font-mono font-bold flex items-center gap-2 ${getRegimeBadgeStyle(regimeData.activeRegime)}`}>
           <Sparkles className="w-4 h-4" />
-          <span>رژیم فعال: {regimeData.regimeFa} ({regimeData.confidencePct}٪ تایید)</span>
+          <span>
+            رژیم پیش‌بینی‌شده: {regimeData.regimeFa} ({regimeData.confidencePct}٪؛{' '}
+            {regimeData.probabilityModelValidation.status === 'CALIBRATED' ? 'کالیبره OOS' : 'خام / کالیبره‌نشده'})
+          </span>
         </div>
       </div>
+      <p className="text-[10px] text-slate-500">
+        افق: {regimeData.probabilityModelValidation.horizonCandles} کندل آینده · مدل:{' '}
+        {regimeData.probabilityModelValidation.modelVersion} · نمونهٔ آموزش/کالیبراسیون/OOS:{' '}
+        {regimeData.probabilityModelValidation.trainingSampleSize}/
+        {regimeData.probabilityModelValidation.calibrationSampleSize}/
+        {regimeData.probabilityModelValidation.oosSampleSize}
+        {regimeData.probabilityModelValidation.oosBrierScore !== null
+          ? ` · Brier OOS: ${regimeData.probabilityModelValidation.oosBrierScore}`
+          : ''}
+      </p>
 
       {/* بخش استراتژی اختصاصی رژیم جاری */}
       <div className="bg-gradient-to-r from-purple-950/50 via-slate-900 to-indigo-950/50 border border-purple-500/30 rounded-xl p-3 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-lg">
@@ -230,7 +258,11 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
             )}
             <div>
               <div className="text-xs font-bold">
-                {edgeMatrix.isSetupAllowedInCurrentRegime ? '✓ ستاپ مجاز به اجرا (لبه آماری مثبت تایید شد)' : '⛔ ستاپ مسدود شد (لبه آماری منفی در رژیم فعلی)'}
+                {edgeMatrix.currentEdgeRecord.validationStatus === 'UNVALIDATED'
+                  ? 'UNVALIDATED — ستاپ تا کفایت داده واقعی مسدود است'
+                  : edgeMatrix.isSetupAllowedInCurrentRegime
+                    ? '✓ ستاپ بر اساس Dataset واقعی مجاز است'
+                    : '⛔ ستاپ بر اساس داده واقعی فاقد Edge مثبت است'}
               </div>
               <p className="text-[11px] text-slate-300 mt-0.5">{edgeMatrix.summaryVerdictFa}</p>
             </div>
@@ -239,17 +271,19 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
           <div className="flex items-center gap-3 shrink-0 bg-slate-950/90 px-3 py-1.5 rounded-lg border border-slate-800 text-xs font-mono">
             <div>
               <span className="text-[10px] text-slate-400 block">وین‌ریت:</span>
-              <span className="text-emerald-400 font-bold">{edgeMatrix.currentEdgeRecord.winRatePct}%</span>
+              <span className="text-emerald-400 font-bold">{edgeMatrix.currentEdgeRecord.winRatePct !== null ? `${edgeMatrix.currentEdgeRecord.winRatePct}%` : 'UNVALIDATED'}</span>
             </div>
             <div>
               <span className="text-[10px] text-slate-400 block">امید ریاضی (Expectancy):</span>
-              <span className={`font-bold ${edgeMatrix.currentEdgeRecord.expectancyR > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {edgeMatrix.currentEdgeRecord.expectancyR > 0 ? `+${edgeMatrix.currentEdgeRecord.expectancyR}R` : `${edgeMatrix.currentEdgeRecord.expectancyR}R`}
+              <span className={`font-bold ${edgeMatrix.currentEdgeRecord.expectancyR !== null && edgeMatrix.currentEdgeRecord.expectancyR > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {edgeMatrix.currentEdgeRecord.expectancyR !== null
+                  ? `${edgeMatrix.currentEdgeRecord.expectancyR > 0 ? '+' : ''}${edgeMatrix.currentEdgeRecord.expectancyR}R`
+                  : 'UNVALIDATED'}
               </span>
             </div>
             <div>
               <span className="text-[10px] text-slate-400 block">Profit Factor:</span>
-              <span className="text-amber-300 font-bold">{edgeMatrix.currentEdgeRecord.profitFactor}</span>
+              <span className="text-amber-300 font-bold">{edgeMatrix.currentEdgeRecord.profitFactor ?? 'UNVALIDATED'}</span>
             </div>
           </div>
         </div>
@@ -283,15 +317,17 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
                       <span>{record.setupTypeFa}</span>
                     </td>
                     <td className="py-2.5 text-center font-mono font-bold text-emerald-400">
-                      {record.winRatePct}%
+                      {record.winRatePct !== null ? `${record.winRatePct}%` : 'UNVALIDATED'}
                     </td>
                     <td className="py-2.5 text-center font-mono text-amber-300">
-                      {record.profitFactor}
+                      {record.profitFactor ?? 'UNVALIDATED'}
                     </td>
                     <td className={`py-2.5 text-center font-mono font-black ${
-                      record.expectancyR > 0 ? 'text-emerald-400' : 'text-rose-400'
+                        record.expectancyR !== null && record.expectancyR > 0 ? 'text-emerald-400' : 'text-rose-400'
                     }`}>
-                      {record.expectancyR > 0 ? `+${record.expectancyR}R` : `${record.expectancyR}R`}
+                      {record.expectancyR !== null
+                        ? `${record.expectancyR > 0 ? '+' : ''}${record.expectancyR}R`
+                        : 'UNVALIDATED'}
                     </td>
                     <td className="py-2.5 text-center">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
@@ -299,7 +335,9 @@ export const RegimeClassifierWidget: React.FC<RegimeClassifierWidgetProps> = ({ 
                           ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
                           : 'bg-rose-950 text-rose-300 border-rose-700'
                       }`}>
-                        {record.positiveEdgeVerified ? '✓ مجاز (ACTIVE)' : '⛔ مسدود (BLOCKED)'}
+                        {record.activationStatus === 'UNVALIDATED'
+                          ? 'UNVALIDATED'
+                          : record.positiveEdgeVerified ? '✓ مجاز (ACTIVE)' : '⛔ مسدود (BLOCKED)'}
                       </span>
                     </td>
                     <td className="py-2.5 pl-2 text-[10px] text-slate-400 max-w-[280px] truncate">

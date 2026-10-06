@@ -4,12 +4,16 @@ import {
   TradeHistory,
   MasterDecisionObject,
   MasterDecisionStatus,
+  MetaModelHealthState,
   MetaLearnerInputFeatures,
   MetaLearnerPrediction,
   ModelDisagreementReport,
+  EntryOpportunitySurfaceReport,
   PredictionStabilityReport,
   TemporalEntryStabilityReport,
 } from '../types/trading';
+import { centralTradeDatasetService } from './centralTradeDataset';
+import { predictEmpiricalMetaProbability } from './empiricalMetaProbabilityModel';
 
 /**
  * 🧠 91-97 & 100. ADVANCED META-MODEL, DYNAMIC ENSEMBLE PRUNING & CANONICAL MASTER DECISION GATE
@@ -23,6 +27,7 @@ export interface DynamicEnsembleModelRecord {
   isFresh: boolean;
   oosPrecisionPct: number | null;
   regimeAccuracyPct: number | null;
+  healthState: MetaModelHealthState;
   effectiveWeight: number;
   isPruned: boolean;
   pruneReasonFa?: string;
@@ -38,6 +43,7 @@ export interface EnsemblePruningReport {
 
 class MetaModelEnsembleEngine {
   private static instance: MetaModelEnsembleEngine;
+  private decisionSequence = 0;
 
   // 94. Rolling prediction history for stability tracking
   private recentPredictionHistory: Array<{ timestamp: number; probability: number; direction: string }> = [];
@@ -69,28 +75,32 @@ class MetaModelEnsembleEngine {
       oosPrecisionPct: number | null;
       regimeAccuracyPct: number | null;
       baseWeight: number;
+      healthState: MetaModelHealthState;
     }>
   ): EnsemblePruningReport {
     const records: DynamicEnsembleModelRecord[] = [];
     let activeWeightSum = 0;
 
     for (const m of rawModels) {
-      const isUnvalidated = m.oosPrecisionPct === null || m.regimeAccuracyPct === null || m.sampleSize < 15;
+      const isUnvalidated = m.oosPrecisionPct === null || m.sampleSize < 15;
       const isFresh = m.sampleSize < 35;
       let effectiveWeight = m.baseWeight;
       let isPruned = false;
       let pruneReasonFa: string | undefined;
 
-      // ۰. اگر مدل فاقد داده کالیبره‌شده واقعی یا OOS باشد، فوراً حذف می‌شود (وزن صفر مطلق)
-      if (isUnvalidated) {
+      if (m.healthState !== 'HEALTHY') {
+        effectiveWeight = 0;
+        isPruned = true;
+        pruneReasonFa = `مدل با وضعیت سلامت ${m.healthState} مجاز به ورود به Ensemble نیست.`;
+      } else if (isUnvalidated) {
         effectiveWeight = 0;
         isPruned = true;
         pruneReasonFa = `حذف کامل مدل (وزن ۰): فاقد داده واقعی کالیبراسیون یا نمونه کافی (حجم نمونه: ${m.sampleSize})`;
-      } else if (m.regimeAccuracyPct !== null && m.regimeAccuracyPct < 50.0 && m.sampleSize >= 15) {
+      } else if (m.oosPrecisionPct !== null && m.oosPrecisionPct < 50.0 && m.sampleSize >= 15) {
         // ۱. اگر مدل در رژیم فعلی عملکرد ضعیف داشته باشد (زیر ۵۰٪ یا افت شدید)، وزن صفر شده و حذف می‌شود
         effectiveWeight = 0;
         isPruned = true;
-        pruneReasonFa = `حذف کامل مدل (وزن ۰) به دلیل افت دقت در رژیم ${regime} (${m.regimeAccuracyPct.toFixed(1)}٪)`;
+        pruneReasonFa = `حذف کامل مدل (وزن ۰) به دلیل افت دقت OOS (${m.oosPrecisionPct.toFixed(1)}٪)`;
       } else if (isFresh) {
         // ۲. اگر مدل تازه است، وزن آن به حداکثر ۰.۰۸ محدود می‌شود تا خطر داده ناکافی مهار شود
         effectiveWeight = Math.min(effectiveWeight, 0.08);
@@ -113,6 +123,7 @@ class MetaModelEnsembleEngine {
         isFresh,
         oosPrecisionPct: m.oosPrecisionPct,
         regimeAccuracyPct: m.regimeAccuracyPct,
+        healthState: m.healthState,
         effectiveWeight,
         isPruned,
         pruneReasonFa,
@@ -157,14 +168,14 @@ class MetaModelEnsembleEngine {
   ): ModelDisagreementReport {
     if (!models || models.length === 0) {
       return {
-        isHighDisagreementDetected: false,
-        disagreementIndex: 0,
-        directionalEntropy: 0,
+        isHighDisagreementDetected: true,
+        disagreementIndex: 100,
+        directionalEntropy: 1,
         conflictingDirectionCount: 0,
         modelsBreakdown: [],
-        disagreementPenaltyFactor: 1.0,
-        vetoTriggered: false,
-        verdictFa: 'اطلاعات مدل‌ها برای ارزیابی اختلاف در دسترس نیست.',
+        disagreementPenaltyFactor: 0,
+        vetoTriggered: true,
+        verdictFa: '🛑 پیش‌بینی مدل معتبری برای سنجش اختلاف در دسترس نیست؛ ورود در وضعیت WAIT مسدود شد.',
       };
     }
 
@@ -174,12 +185,26 @@ class MetaModelEnsembleEngine {
     let totalWeight = 0;
 
     for (const m of models) {
-      const w = Math.max(0.0, m.effectiveWeightPct);
-      if (w <= 0 || m.confidencePct === null || m.confidencePct <= 0) continue;
-      totalWeight += w;
-      if (m.direction === 'LONG') longWeight += w;
-      else if (m.direction === 'SHORT') shortWeight += w;
-      else neutralWeight += w;
+      const w = Number.isFinite(m.effectiveWeightPct) ? Math.max(0.0, m.effectiveWeightPct) : 0;
+      const confidence = m.confidencePct;
+      if (
+        w <= 0 ||
+        confidence === null ||
+        !Number.isFinite(confidence) ||
+        confidence <= 0 ||
+        confidence > 100
+      ) continue;
+
+      const directionalEvidenceWeight = w * (confidence / 100);
+      if (directionalEvidenceWeight <= 0) continue;
+      totalWeight += directionalEvidenceWeight;
+      if (m.direction === 'LONG') {
+        longWeight += directionalEvidenceWeight;
+      } else if (m.direction === 'SHORT') {
+        shortWeight += directionalEvidenceWeight;
+      } else {
+        neutralWeight += directionalEvidenceWeight;
+      }
     }
 
     if (totalWeight <= 0) {
@@ -263,33 +288,20 @@ class MetaModelEnsembleEngine {
     disagreementReport: ModelDisagreementReport,
     pruningReport: EnsemblePruningReport
   ): MetaLearnerPrediction {
-    const {
-      modelPredictions,
-      garchFeature,
-      bayesianFeature,
-      orderBookFeature,
-      cvdFeature,
-      oiFeature,
-      fundingFeature,
-      momentumFeature,
-      marketRegime,
-      spreadBps,
-      volatilityPct,
-      disagreementIndex,
-      predictionStabilityScore,
-      latencyMs,
-    } = inputs;
-
     // ارزیابی آماری و وزن‌دهی تجربی مدل‌های مستقل بر اساس وضعیت OOS
     let aggregateLongScore = 0;
     let aggregateShortScore = 0;
     let totalActiveWeight = 0;
-    let highestWeightModel = 'M1_CENTRAL';
+    let highestWeightModel = 'NO_VALIDATED_MODEL';
 
     for (const pr of pruningReport.models) {
-      if (pr.isPruned) continue;
-      const pred = modelPredictions[pr.modelId] || { direction: 'NEUTRAL', prob: null };
-      if (pred.prob === null || pred.prob <= 0) continue;
+      if (pr.isPruned || pr.healthState !== 'HEALTHY') continue;
+      const pred = inputs.modelPredictions[pr.modelId] || {
+        direction: 'NEUTRAL',
+        prob: null,
+        healthState: 'SUSPENDED' as const,
+      };
+      if (pred.healthState !== 'HEALTHY' || pred.prob === null || !Number.isFinite(pred.prob) || pred.prob <= 0 || pred.prob > 100) continue;
       const w = pr.effectiveWeight;
       totalActiveWeight += w;
 
@@ -304,77 +316,96 @@ class MetaModelEnsembleEngine {
       }
     }
 
-    // بررسی شرایط وتوی فرامدل (اصطکاک بازار، تشتت آرا یا عدم وجود مدل کالیبره‌شده)
-    const isVetoed = disagreementReport.vetoTriggered || totalActiveWeight <= 0;
-    const bidDepth = orderBookFeature?.bidDepthUsd ?? 500000;
-    const askDepth = orderBookFeature?.askDepthUsd ?? 500000;
-    const totalLiquidityUsd = bidDepth + askDepth;
-    const liquidityPenalty = totalLiquidityUsd < 100000 ? 0.85 : 1.0;
-    const spreadPenalty = spreadBps > 5.0 ? 0.90 : 1.0;
-    const latencyPenalty = latencyMs > 300 ? 0.80 : 1.0;
-
     let finalDirection: 'LONG' | 'SHORT' | 'NEUTRAL' = 'NEUTRAL';
-    let rawProb = 50.0;
-
-    if (!isVetoed) {
-      if (aggregateLongScore > aggregateShortScore && aggregateLongScore > 0.30) {
+    let ensembleProbability: number | null = null;
+    if (totalActiveWeight > 0 && aggregateLongScore !== aggregateShortScore) {
+      if (aggregateLongScore > aggregateShortScore) {
         finalDirection = 'LONG';
-        rawProb = Math.min(92, Math.round((aggregateLongScore / Math.max(0.01, totalActiveWeight)) * 100));
-      } else if (aggregateShortScore > aggregateLongScore && aggregateShortScore > 0.35) {
+        ensembleProbability = aggregateLongScore / totalActiveWeight;
+      } else {
         finalDirection = 'SHORT';
-        rawProb = Math.min(92, Math.round((aggregateShortScore / Math.max(0.01, totalActiveWeight)) * 100));
+        ensembleProbability = aggregateShortScore / totalActiveWeight;
       }
     }
 
-    // محاسبه احتمال کالیبره‌شده نهایی یا null
-    const calibratedProbabilityPct: number | null = isVetoed || rawProb < 52
+    const empiricalModel = finalDirection === 'NEUTRAL'
       ? null
-      : Math.round(
-          Math.max(40, rawProb * disagreementReport.disagreementPenaltyFactor * liquidityPenalty * spreadPenalty * latencyPenalty) * 10
-        ) / 10;
-
+      : predictEmpiricalMetaProbability(
+          centralTradeDatasetService.getAllPredictions(),
+          inputs,
+          finalDirection,
+          ensembleProbability
+        );
+    const isVetoed = disagreementReport.vetoTriggered || totalActiveWeight <= 0;
+    const calibratedProbabilityPct = !isVetoed && empiricalModel?.status === 'CALIBRATED' && empiricalModel.probability !== null
+      ? Math.round(empiricalModel.probability * 1000) / 10
+      : null;
     const calibrationStatus: MetaLearnerPrediction['calibrationStatus'] =
-      calibratedProbabilityPct !== null ? 'CALIBRATED' : (isVetoed ? 'UNCALIBRATED' : 'UNRANKED');
+      calibratedProbabilityPct !== null ? 'CALIBRATED' : (empiricalModel?.status === 'UNCALIBRATED' || isVetoed ? 'UNCALIBRATED' : 'UNRANKED');
 
-    // برآورد بازده انتظاری R و $ بر پایه احتمال کالیبره‌شده و نسبت R:R پایه ۲.۲
+    // محاسبه Edge از توزیع نتایج واقعیِ OOS مدل فرامدل
     let expectedReturnR: number | null = null;
-    let expectedReturnUsd: number | null = null;
-    if (calibratedProbabilityPct !== null) {
+    const expectedReturnUsd: number | null = null;
+    if (
+      calibratedProbabilityPct !== null &&
+      empiricalModel?.averageWinR !== null &&
+      empiricalModel?.averageLossR !== null
+    ) {
       const p = calibratedProbabilityPct / 100;
-      const frictionR = 0.08; // اصطکاک اسپرد و کارمزد در R
-      expectedReturnR = Math.round(((p * 2.2) - ((1 - p) * 1.0) - frictionR) * 100) / 100;
-      expectedReturnUsd = Math.round((expectedReturnR * 50) * 100) / 100;
+      expectedReturnR = Math.round((p * empiricalModel.averageWinR + (1 - p) * empiricalModel.averageLossR) * 100) / 100;
     }
 
-    // محاسبه بازه اطمینان ۹۵٪ (Confidence Interval)
-    let confidenceInterval: MetaLearnerPrediction['confidenceInterval'] = null;
-    if (calibratedProbabilityPct !== null) {
-      const ciMargin = Math.round((disagreementIndex * 0.15 + (100 - calibratedProbabilityPct) * 0.12 + (volatilityPct > 3 ? 4 : 2)) * 10) / 10;
-      confidenceInterval = {
-        lowerBoundPct: Math.max(10, Math.round((calibratedProbabilityPct - ciMargin) * 10) / 10),
-        upperBoundPct: Math.min(99, Math.round((calibratedProbabilityPct + ciMargin) * 10) / 10),
-        confidenceLevelPct: 95,
-      };
-    }
+    const closedTrades = centralTradeDatasetService.getAllTradeRecords().filter(trade =>
+      trade.isClosed &&
+      (trade.outcome === 'WIN' || trade.outcome === 'LOSS' || trade.outcome === 'BREAKEVEN') &&
+      Number.isFinite(trade.entryPrice) &&
+      Number.isFinite(trade.stopPrice) &&
+      Number.isFinite(trade.notionalUsd) &&
+      trade.notionalUsd > 0
+    );
+    const excursionSamples = closedTrades.flatMap(trade => {
+      const riskUsd = trade.notionalUsd * (Math.abs(trade.entryPrice - trade.stopPrice) / trade.entryPrice);
+      if (
+        riskUsd <= 0 ||
+        typeof trade.MAE !== 'number' || !Number.isFinite(trade.MAE) ||
+        typeof trade.MFE !== 'number' || !Number.isFinite(trade.MFE) ||
+        typeof trade.timeInTradeSeconds !== 'number' || !Number.isFinite(trade.timeInTradeSeconds) ||
+        trade.timeInTradeSeconds < 0
+      ) return [];
+      return [{
+        maeR: trade.MAE / riskUsd,
+        mfeR: trade.MFE / riskUsd,
+        durationSeconds: trade.timeInTradeSeconds,
+      }];
+    });
+    const hasSufficientExcursionSamples = excursionSamples.length >= 20;
+    const expectedMaeR = hasSufficientExcursionSamples
+      ? Math.round(excursionSamples.reduce((sum, sample) => sum + sample.maeR, 0) / excursionSamples.length * 100) / 100
+      : null;
+    const expectedMfeR = hasSufficientExcursionSamples
+      ? Math.round(excursionSamples.reduce((sum, sample) => sum + sample.mfeR, 0) / excursionSamples.length * 100) / 100
+      : null;
+    const expectedDurationSeconds = hasSufficientExcursionSamples
+      ? Math.round(excursionSamples.reduce((sum, sample) => sum + sample.durationSeconds, 0) / excursionSamples.length)
+      : null;
 
-    const expectedMaeR = 0.38;
-    const expectedMfeR = 2.4;
-
+    const confidenceInterval: MetaLearnerPrediction['confidenceInterval'] = null;
     let metaRationaleFa = calibratedProbabilityPct !== null
-      ? `فرامدل (Meta-Model): جهت [${finalDirection}] با احتمال کالیبره‌شده ${calibratedProbabilityPct}٪ (EV: +${expectedReturnR}R) در رژیم ${marketRegime} استخراج شد.`
-      : `فرامدل (Meta-Model): معامله غیرمجاز می‌باشد (وضعیت: ${calibrationStatus}). علت: ${disagreementReport.verdictFa}`;
+      ? `Meta-Model یادگرفته‌شده از ترکیب احتمال‌های رژیم، ستاپ، Order Flow، نوسان، نقدینگی و توافق مدل‌ها: ${finalDirection} با احتمال OOS کالیبره‌شده ${calibratedProbabilityPct}٪ و Edge تاریخی ${expectedReturnR ?? 'ناموجود'}R.`
+      : `Meta-Model اجازه معامله نمی‌دهد: ${disagreementReport.vetoTriggered ? disagreementReport.verdictFa : `داده/نمونه OOS کافی یا کیفیت لازم احراز نشد (Train/Calibration/OOS: ${empiricalModel?.trainingSampleSize ?? 0}/${empiricalModel?.calibrationSampleSize ?? 0}/${empiricalModel?.oosSampleSize ?? 0}).`}`;
 
     return {
-      direction: finalDirection,
+      direction: calibratedProbabilityPct !== null ? finalDirection : 'NEUTRAL',
       calibratedProbabilityPct,
       expectedReturnR,
       expectedReturnUsd,
       expectedMaeR,
       expectedMfeR,
+      expectedDurationSeconds,
       confidenceInterval,
       dominantModelId: highestWeightModel,
       calibrationStatus,
-      confidenceScorePct: calibratedProbabilityPct !== null ? Math.round(calibratedProbabilityPct * 0.90) : null,
+      confidenceScorePct: calibratedProbabilityPct,
       metaRationaleFa,
       evaluatedAt: Date.now(),
     };
@@ -385,8 +416,9 @@ class MetaModelEnsembleEngine {
   // =========================================================================
   public evaluatePredictionStability(currentProb: number | null, currentDir: string): PredictionStabilityReport {
     const now = Date.now();
-    const probVal = currentProb ?? 0;
-    this.recentPredictionHistory.push({ timestamp: now, probability: probVal, direction: currentDir });
+    if (currentProb !== null && Number.isFinite(currentProb)) {
+      this.recentPredictionHistory.push({ timestamp: now, probability: currentProb, direction: currentDir });
+    }
 
     // نگه‌داری نمونه‌های ۱۰ ثانیه اخیر (حداکثر ۱۵ نمونه)
     this.recentPredictionHistory = this.recentPredictionHistory
@@ -396,14 +428,18 @@ class MetaModelEnsembleEngine {
     const probs = this.recentPredictionHistory.map(p => p.probability);
     const dirs = this.recentPredictionHistory.map(p => p.direction);
 
-    if (probs.length < 3) {
+    if (currentProb === null || !Number.isFinite(currentProb) || probs.length < 3) {
       return {
-        isPredictionStable: true,
-        predictionStabilityScore: 90,
+        isPredictionStable: false,
+        predictionStabilityScore: 0,
         recentPredictionsJitterVariance: 0,
-        isEntryBlockedByInstability: false,
+        isEntryBlockedByInstability: true,
         recentProbabilitiesSample: probs,
-        reasonsFa: ['تعداد نمونه‌های اخیر برای سنجش نوسان در حال تکمیل است.'],
+        reasonsFa: [
+          currentProb === null || !Number.isFinite(currentProb)
+            ? 'احتمال معتبر در دسترس نیست؛ ورود تا دریافت پیش‌بینی کالیبره‌شده متوقف است.'
+            : `نمونه‌های متوالی ناکافی است (${probs.length}/۳)؛ وضعیت WAIT تا تکمیل تاریخچه پایداری.`,
+        ],
         evaluatedAt: now,
       };
     }
@@ -538,6 +574,7 @@ class MetaModelEnsembleEngine {
     pipelineRejections: string[];
     riskGovernorApproved: boolean;
     riskGovernorBlockers: string[];
+    opportunitySurface?: EntryOpportunitySurfaceReport;
     price: number;
     stopLossPrice: number;
     takeProfitPrice: number;
@@ -554,6 +591,7 @@ class MetaModelEnsembleEngine {
       pipelineRejections,
       riskGovernorApproved,
       riskGovernorBlockers,
+      opportunitySurface,
       price,
       stopLossPrice,
       takeProfitPrice,
@@ -579,6 +617,9 @@ class MetaModelEnsembleEngine {
     if (!temporalStability.isTemporalStabilityVerified) {
       allBlockers.push(temporalStability.verdictFa);
     }
+    if (opportunitySurface && opportunitySurface.mode !== 'EXECUTE' && opportunitySurface.nearMissReasonFa) {
+      allBlockers.push(opportunitySurface.nearMissReasonFa);
+    }
 
     let status: MasterDecisionStatus = 'NO_TRADE';
     let statusFa = '🛑 بدون معامله (NO_TRADE)';
@@ -587,8 +628,9 @@ class MetaModelEnsembleEngine {
     const hasNoBlockers = allBlockers.length === 0;
     const isDirectionValid = metaLearnerOutput.direction !== 'NEUTRAL';
     const isProbSufficient = metaLearnerOutput.calibratedProbabilityPct !== null && metaLearnerOutput.calibratedProbabilityPct >= 65.0;
+    const isOpportunityExecutable = opportunitySurface?.mode === 'EXECUTE';
 
-    if (pipelinePassed && riskGovernorApproved && hasNoBlockers && isDirectionValid && isProbSufficient) {
+    if (pipelinePassed && riskGovernorApproved && hasNoBlockers && isDirectionValid && isProbSufficient && isOpportunityExecutable) {
       if (temporalStability.isStructuralTriggerConfirmed) {
         status = 'EXECUTE';
         statusFa = '🚀 صدور مجوز اجرای قطعی (EXECUTE)';
@@ -608,7 +650,8 @@ class MetaModelEnsembleEngine {
       executionPermitted = false;
     }
 
-    const uniqueId = `MST_${now}_${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+    this.decisionSequence += 1;
+    const uniqueId = `MST_${now}_${this.decisionSequence.toString(36).toUpperCase()}`;
 
     return {
       decisionId: uniqueId,
@@ -641,6 +684,7 @@ class MetaModelEnsembleEngine {
       disagreementReport,
       predictionStability,
       temporalStability,
+      opportunitySurface,
     };
   }
 }

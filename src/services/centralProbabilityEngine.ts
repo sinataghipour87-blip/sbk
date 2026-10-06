@@ -6,15 +6,15 @@ import { learnedRegimeWeightsService, FeatureClusterId, ClusterFeatureVote } fro
  * 🧠 ADVANCED MATHEMATICAL PROBABILITY & CALIBRATION ENGINE (ITEMS 1 - 4 & 8)
  * 
  * CORE LAWS IMPLEMENTED:
- * 1. ZERO ARTIFICIAL PROBABILITIES:
- *    Probabilities are NEVER constructed from arbitrary weighted score sums.
- *    They are strictly derived from empirical Walk-Forward models evaluated on True Out-of-Sample records.
+ * 1. SNAPSHOT-BASED PREDICTION:
+ *    A logistic prediction model is fitted only on historical feature snapshots and outcomes.
+ *    Stored prediction probabilities are never used as model inputs.
  * 2. THREE INDEPENDENT DATA PARTITIONS (TRAINING, VALIDATION, TRUE OUT-OF-SAMPLE):
- *    - Training Set (60%): Model feature weight fitting.
- *    - Validation Set (20%): Platt scaling calibration parameter fitting (A, B logistic parameters).
- *    - True Out-of-Sample Set (20%): Strictly unseen, chronological final holdout set.
+ *    - Training Set (60%): Snapshot feature-model fitting.
+ *    - Validation Set (20%): Platt A/B fitting by cross-entropy.
+ *    - True Out-of-Sample Set (20%): Unseen evaluation and stability verification only.
  *    ECE, Brier Score, Log Loss, and OOS Accuracy are computed EXCLUSIVELY on True OOS.
- *    Without true OOS (min 10 resolved records), calibrationStatus = 'UNCALIBRATED', probability = null.
+ *    OOS minimum grows with observed variance and setup/model complexity; insufficient OOS remains uncalibrated.
  * 3. FOUR DISTINCT INDEPENDENT OUTPUTS:
  *    a) Direction Score (-100 to +100)
  *    b) Setup/Trade Quality Score (0 to 100)
@@ -36,6 +36,9 @@ export interface BrainEvidenceInput {
   volatilityPct: number;
   adx: number;
   rsi: number;
+  ema20?: number;
+  ema50?: number;
+  ema200?: number;
   setupType?: string;
   marketRegime?: string;
   timeframe?: '15m' | '30m' | '1H';
@@ -63,6 +66,8 @@ export interface SetupRegimePerformanceMetrics {
   trainSampleSize: number;
   valSampleSize: number;
   oosSampleSize: number;
+  requiredOosSampleSize: number;
+  fillRate: number | null;
   winCount: number;
   lossCount: number;
   rawProbability: number | null;
@@ -96,6 +101,232 @@ export interface SetupRegimePerformanceMetrics {
     predictedConfidence: number;
     sampleCount: number;
   }>;
+}
+
+type PredictionFeatureVector = number[];
+
+interface PredictionTrainingExample {
+  features: PredictionFeatureVector;
+  label: 0 | 1;
+}
+
+interface LogisticPredictionModel {
+  means: PredictionFeatureVector;
+  scales: PredictionFeatureVector;
+  weights: PredictionFeatureVector;
+  intercept: number;
+}
+
+interface PlattCalibrationModel {
+  a: number;
+  b: number;
+}
+
+const MIN_TRAIN_SAMPLES = 40;
+const MIN_VALIDATION_SAMPLES = 20;
+const MIN_BASE_OOS_SAMPLES = 200;
+const OOS_MAX_CI_HALF_WIDTH = 0.07;
+const MIN_CLASS_SAMPLES = 5;
+
+function requiredOutOfSampleSize(
+  trainingWinRate: number,
+  featureCount: number,
+  setupType: string
+): number {
+  const variance = trainingWinRate * (1 - trainingWinRate);
+  const varianceBound = Math.ceil((1.96 ** 2 * variance) / (OOS_MAX_CI_HALF_WIDTH ** 2));
+  const setupName = setupType.toUpperCase();
+  const setupComplexity = /ORDER.?BLOCK|LIQUIDITY|BREAKOUT|FVG|REVERSAL/.test(setupName) ? 1.5 : 1.25;
+  const modelComplexityMultiplier = Math.sqrt(featureCount / 4);
+  const varianceAndComplexityBound = Math.ceil(varianceBound * modelComplexityMultiplier * setupComplexity);
+  const modelComplexityBound = Math.ceil((featureCount + 2) * 15 * setupComplexity);
+  return Math.max(MIN_BASE_OOS_SAMPLES, varianceAndComplexityBound, modelComplexityBound);
+}
+
+function finiteFeatureValue(...values: unknown[]): number | null {
+  const value = values.find(candidate => typeof candidate === 'number' && Number.isFinite(candidate));
+  return typeof value === 'number' ? value : null;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function extractPredictionFeatureVector(
+  source: Record<string, any>,
+  direction: 'LONG' | 'SHORT'
+): PredictionFeatureVector | null {
+  const features = source.features || {};
+  const multiplier = direction === 'LONG' ? 1 : -1;
+  const price = finiteFeatureValue(source.price, source.entryPrice);
+  const scoreLong = finiteFeatureValue(source.scoreLong, features.scoreLong);
+  const scoreShort = finiteFeatureValue(source.scoreShort, features.scoreShort);
+  const obi = finiteFeatureValue(source.obi, features.obi);
+  const rsi = finiteFeatureValue(source.rsi, features.rsi);
+  const adx = finiteFeatureValue(source.adx, features.adx);
+  const volatility = finiteFeatureValue(source.volatilityPct, source.volatility, features.volatilityPct);
+  const ema20 = finiteFeatureValue(source.ema20, source.ema20Val, features.ema20);
+  const ema50 = finiteFeatureValue(source.ema50, source.ema50Val, features.ema50);
+  const ema200 = finiteFeatureValue(source.ema200, source.ema200Val, features.ema200);
+
+  if (
+    price === null || price <= 0 || scoreLong === null || scoreShort === null ||
+    obi === null || rsi === null || adx === null || volatility === null ||
+    ema20 === null || ema50 === null || ema200 === null
+  ) {
+    return null;
+  }
+
+  return [
+    clamp(((scoreLong - scoreShort) / 5) * multiplier, -2, 2),
+    clamp(obi * multiplier, -1, 1),
+    clamp(((rsi - 50) / 25) * multiplier, -2, 2),
+    clamp(adx / 25, 0, 2),
+    clamp(volatility / 2, 0, 3),
+    clamp(((ema20 - ema50) / price) * 100 * multiplier, -3, 3),
+    clamp(((ema50 - ema200) / price) * 100 * multiplier, -3, 3),
+  ];
+}
+
+export function extractCurrentPredictionFeatures(input: BrainEvidenceInput): PredictionFeatureVector | null {
+  if (input.trendBias === 'NEUTRAL') return null;
+  return extractPredictionFeatureVector(input, input.trendBias === 'BULLISH' ? 'LONG' : 'SHORT');
+}
+
+function sigmoid(value: number): number {
+  if (value >= 0) {
+    const exp = Math.exp(-Math.min(value, 40));
+    return 1 / (1 + exp);
+  }
+  const exp = Math.exp(Math.max(value, -40));
+  return exp / (1 + exp);
+}
+
+function fitPredictionModel(examples: PredictionTrainingExample[]): LogisticPredictionModel | null {
+  if (
+    examples.length < MIN_TRAIN_SAMPLES ||
+    examples.filter(example => example.label === 1).length < MIN_CLASS_SAMPLES ||
+    examples.filter(example => example.label === 0).length < MIN_CLASS_SAMPLES
+  ) {
+    return null;
+  }
+
+  const featureCount = examples[0].features.length;
+  const means = Array.from({ length: featureCount }, (_, index) =>
+    examples.reduce((sum, example) => sum + example.features[index], 0) / examples.length
+  );
+  const scales = Array.from({ length: featureCount }, (_, index) => {
+    const variance = examples.reduce((sum, example) =>
+      sum + Math.pow(example.features[index] - means[index], 2), 0
+    ) / examples.length;
+    return Math.max(Math.sqrt(variance), 1e-6);
+  });
+  const weights = Array.from({ length: featureCount }, () => 0);
+  let intercept = 0;
+  const learningRate = 0.04;
+  const regularization = 0.02;
+
+  for (let iteration = 0; iteration < 1200; iteration++) {
+    const weightGradient = Array.from({ length: featureCount }, () => 0);
+    let interceptGradient = 0;
+
+    for (const example of examples) {
+      const normalized = example.features.map((value, index) => (value - means[index]) / scales[index]);
+      const probability = sigmoid(intercept + normalized.reduce((sum, value, index) => sum + value * weights[index], 0));
+      const error = probability - example.label;
+      interceptGradient += error;
+      normalized.forEach((value, index) => {
+        weightGradient[index] += error * value;
+      });
+    }
+
+    intercept -= learningRate * interceptGradient / examples.length;
+    weights.forEach((weight, index) => {
+      weights[index] -= learningRate * (weightGradient[index] / examples.length + regularization * weight);
+    });
+  }
+
+  if (![intercept, ...weights].every(Number.isFinite)) return null;
+  return { means, scales, weights, intercept };
+}
+
+function predictRawProbability(model: LogisticPredictionModel, features: PredictionFeatureVector): number {
+  const logit = model.intercept + features.reduce((sum, value, index) =>
+    sum + ((value - model.means[index]) / model.scales[index]) * model.weights[index], 0
+  );
+  return clamp(sigmoid(logit), 0.001, 0.999);
+}
+
+function fitPlattCalibration(
+  examples: Array<{ probability: number; label: 0 | 1 }>
+): PlattCalibrationModel | null {
+  if (
+    examples.length < MIN_VALIDATION_SAMPLES ||
+    examples.filter(example => example.label === 1).length < MIN_CLASS_SAMPLES ||
+    examples.filter(example => example.label === 0).length < MIN_CLASS_SAMPLES
+  ) {
+    return null;
+  }
+
+  const logits = examples.map(example => Math.log(example.probability / (1 - example.probability)));
+  let a = 1;
+  let b = 0;
+
+  for (let iteration = 0; iteration < 100; iteration++) {
+    let gradientA = 0;
+    let gradientB = 0;
+    let hessianAA = 1e-6;
+    let hessianAB = 0;
+    let hessianBB = 1e-6;
+
+    examples.forEach((example, index) => {
+      const logit = logits[index];
+      const probability = sigmoid(a * logit + b);
+      const error = probability - example.label;
+      const variance = probability * (1 - probability);
+      gradientA += error * logit;
+      gradientB += error;
+      hessianAA += variance * logit * logit;
+      hessianAB += variance * logit;
+      hessianBB += variance;
+    });
+
+    const determinant = hessianAA * hessianBB - hessianAB * hessianAB;
+    if (!Number.isFinite(determinant) || determinant < 1e-12) return null;
+
+    const stepA = (hessianBB * gradientA - hessianAB * gradientB) / determinant;
+    const stepB = (hessianAA * gradientB - hessianAB * gradientA) / determinant;
+    a = clamp(a - stepA, -20, 20);
+    b = clamp(b - stepB, -20, 20);
+    if (Math.max(Math.abs(stepA), Math.abs(stepB)) < 1e-6) break;
+  }
+
+  return Number.isFinite(a) && Number.isFinite(b) ? { a, b } : null;
+}
+
+function applyPlattCalibration(model: PlattCalibrationModel, rawProbability: number): number {
+  const rawLogit = Math.log(rawProbability / (1 - rawProbability));
+  return clamp(sigmoid(model.a * rawLogit + model.b), 0.001, 0.999);
+}
+
+function calculateOosPredictionInterval(
+  probability: number,
+  predictions: Array<{ probability: number; label: 0 | 1 }>
+): { lowerBound: number; upperBound: number; confidenceLevelPct: number } | null {
+  if (predictions.length === 0) return null;
+  const absoluteErrors = predictions
+    .map(prediction => Math.abs(prediction.label - prediction.probability))
+    .sort((a, b) => a - b);
+  const rank = Math.min(
+    absoluteErrors.length - 1,
+    Math.ceil((absoluteErrors.length + 1) * 0.95) - 1
+  );
+  const radius = absoluteErrors[rank];
+  return {
+    lowerBound: Number(Math.max(0, probability - radius).toFixed(4)),
+    upperBound: Number(Math.min(1, probability + radius).toFixed(4)),
+    confidenceLevelPct: 95
+  };
 }
 
 /**
@@ -133,7 +364,9 @@ export function calculateWilsonConfidenceInterval(
 export function evaluateRealLearnedSegmentMetrics(
   setupType: string,
   marketRegime: string,
-  timeframe: string
+  timeframe: string,
+  currentFeatureVector: PredictionFeatureVector | null = null,
+  direction?: 'LONG' | 'SHORT'
 ): SetupRegimePerformanceMetrics {
   const datasetService = CentralTradeDatasetService.getInstance();
   const allPredictions = datasetService.getAllPredictions();
@@ -144,197 +377,178 @@ export function evaluateRealLearnedSegmentMetrics(
       const matchSetup = rec.setupType.toUpperCase() === setupType.toUpperCase();
       const matchRegime = rec.marketRegime.toUpperCase() === marketRegime.toUpperCase();
       const matchTf = (rec.timeframe || '15m').toUpperCase() === timeframe.toUpperCase();
-      return matchSetup && matchRegime && matchTf;
+      const matchDirection = direction === undefined || rec.direction === direction;
+      return matchSetup && matchRegime && matchTf && matchDirection;
     })
     .sort((a, b) => a.timestamp - b.timestamp);
 
   const sampleSize = segmentRecords.length;
-  const resolvedRecords = segmentRecords.filter(r => r.outcome === 'WIN' || r.outcome === 'LOSS');
+  const featureRecords = segmentRecords.flatMap(record => {
+    if (
+      (record.outcome !== 'WIN' && record.outcome !== 'LOSS') ||
+      (record.direction !== 'LONG' && record.direction !== 'SHORT')
+    ) return [];
+    const features = extractPredictionFeatureVector(record, record.direction === 'SHORT' ? 'SHORT' : 'LONG');
+    return features ? [{ record, features, label: record.outcome === 'WIN' ? 1 as const : 0 as const }] : [];
+  });
+  const resolvedRecords = featureRecords.map(example => example.record);
   const resolvedSampleSize = resolvedRecords.length;
 
-  const MIN_RESOLVED_FOR_CALIBRATION = 15;
-  const MIN_OOS_SIZE = 4; // Absolute minimum unseen holdout samples to evaluate calibration
-
-  const modelVersion = 'v3.2-walkforward-platt';
-  const datasetVersion = 'v3.2-chronological-records';
+  const modelVersion = 'v4.0-snapshot-logistic-platt';
+  const datasetVersion = 'v4.0-feature-snapshots';
   const lastRecordTime = resolvedRecords.length > 0 ? resolvedRecords[resolvedRecords.length - 1].timestamp : null;
   const lastTrainedAt = lastRecordTime ? new Date(lastRecordTime).toISOString() : null;
 
-  // Fail-Closed when insufficient resolved data exists
-  if (resolvedSampleSize < MIN_RESOLVED_FOR_CALIBRATION) {
-    return {
-      setupType,
-      marketRegime,
-      timeframe,
-      sampleSize,
-      resolvedSampleSize,
-      trainSampleSize: 0,
-      valSampleSize: 0,
-      oosSampleSize: 0,
-      winCount: 0,
-      lossCount: 0,
-      rawProbability: null,
-      calibratedWinProbability: null,
-      winRatePct: 0,
-      precision: null,
-      outOfSampleAccuracy: null,
-      brierScore: null,
-      logLoss: null,
-      expectedCalibrationError: null,
-      averageR: null,
-      expectancyUsd: null,
-      profitFactor: null,
-      maxDrawdownPct: null,
-      tailRiskPct: null,
-      riskAdjustedEdge: null,
-      avgMaePct: null,
-      avgMfePct: null,
-      avgTimeToTargetSec: null,
-      avgTimeToStopSec: null,
-      isCalibrationVerified: false,
-      calibrationStatus: 'UNCALIBRATED',
-      modelVersion,
-      datasetVersion,
-      lastTrainedAt,
-      isActivated: false,
-      confidenceInterval: null,
-      reliabilityDiagramBins: []
-    };
-  }
-
-  // 1. CHRONOLOGICAL 3-SET PARTITIONING (WALK-FORWARD COMPLIANT)
-  // Training (60%), Validation (20%), True Out-of-Sample Holdout (20%)
   const trainEndIdx = Math.floor(resolvedSampleSize * 0.60);
   const valEndIdx = Math.floor(resolvedSampleSize * 0.80);
-
-  const trainSet = resolvedRecords.slice(0, trainEndIdx);
-  const valSet = resolvedRecords.slice(trainEndIdx, valEndIdx);
-  const oosSet = resolvedRecords.slice(valEndIdx);
-
+  const trainSet = featureRecords.slice(0, trainEndIdx);
+  const valSet = featureRecords.slice(trainEndIdx, valEndIdx);
+  const oosSet = featureRecords.slice(valEndIdx);
   const trainSampleSize = trainSet.length;
   const valSampleSize = valSet.length;
   const oosSampleSize = oosSet.length;
+  const requiredOosSampleSize = trainSet.length > 0
+    ? requiredOutOfSampleSize(
+      trainSet.filter(example => example.label === 1).length / trainSet.length,
+      trainSet[0].features.length,
+      setupType
+    )
+    : MIN_BASE_OOS_SAMPLES;
 
-  if (oosSampleSize < MIN_OOS_SIZE) {
-    // Insufficient OOS samples: mark as UNCALIBRATED
-    return {
-      setupType,
-      marketRegime,
-      timeframe,
-      sampleSize,
-      resolvedSampleSize,
-      trainSampleSize,
-      valSampleSize,
-      oosSampleSize,
-      winCount: resolvedRecords.filter(r => r.outcome === 'WIN').length,
-      lossCount: resolvedRecords.filter(r => r.outcome === 'LOSS').length,
-      rawProbability: null,
-      calibratedWinProbability: null,
-      winRatePct: 0,
-      precision: null,
-      outOfSampleAccuracy: null,
-      brierScore: null,
-      logLoss: null,
-      expectedCalibrationError: null,
-      averageR: null,
-      expectancyUsd: null,
-      profitFactor: null,
-      maxDrawdownPct: null,
-      tailRiskPct: null,
-      riskAdjustedEdge: null,
-      avgMaePct: null,
-      avgMfePct: null,
-      avgTimeToTargetSec: null,
-      avgTimeToStopSec: null,
-      isCalibrationVerified: false,
-      calibrationStatus: 'UNCALIBRATED',
-      modelVersion,
-      datasetVersion,
-      lastTrainedAt,
-      isActivated: false,
-      confidenceInterval: null,
-      reliabilityDiagramBins: []
-    };
+  const emptyMetrics = (): SetupRegimePerformanceMetrics => ({
+    setupType,
+    marketRegime,
+    timeframe,
+    sampleSize,
+    resolvedSampleSize,
+    trainSampleSize,
+    valSampleSize,
+    oosSampleSize,
+    requiredOosSampleSize,
+    fillRate: null,
+    winCount: resolvedRecords.filter(record => record.outcome === 'WIN').length,
+    lossCount: resolvedRecords.filter(record => record.outcome === 'LOSS').length,
+    rawProbability: null,
+    calibratedWinProbability: null,
+    winRatePct: 0,
+    precision: null,
+    outOfSampleAccuracy: null,
+    brierScore: null,
+    logLoss: null,
+    expectedCalibrationError: null,
+    averageR: null,
+    expectancyUsd: null,
+    profitFactor: null,
+    maxDrawdownPct: null,
+    tailRiskPct: null,
+    riskAdjustedEdge: null,
+    avgMaePct: null,
+    avgMfePct: null,
+    avgTimeToTargetSec: null,
+    avgTimeToStopSec: null,
+    isCalibrationVerified: false,
+    calibrationStatus: 'UNCALIBRATED',
+    modelVersion,
+    datasetVersion,
+    lastTrainedAt,
+    isActivated: false,
+    confidenceInterval: null,
+    reliabilityDiagramBins: []
+  });
+
+  if (
+    trainSampleSize < MIN_TRAIN_SAMPLES ||
+    valSampleSize < MIN_VALIDATION_SAMPLES ||
+    oosSampleSize < requiredOosSampleSize
+  ) {
+    return emptyMetrics();
   }
 
-  // 2. FIT PLATT SCALING ON VALIDATION SET ONLY
-  // Logistic calibration model: P_calibrated = 1 / (1 + exp(A * f(x) + B))
-  // We estimate A and B by minimizing cross-entropy loss on valSet.
-  let plattA = -1.0;
-  let plattB = 0.0;
+  const predictionModel = fitPredictionModel(trainSet);
+  if (!predictionModel) return emptyMetrics();
 
-  const valWins = valSet.filter(r => r.outcome === 'WIN').length;
-  const valWinRate = valSet.length > 0 ? valWins / valSet.length : 0.5;
-  const basePriorLogit = Math.log(Math.max(0.01, valWinRate) / Math.max(0.01, 1 - valWinRate));
-  plattB = -basePriorLogit;
+  const validationPredictions = valSet.map(example => ({
+    probability: predictRawProbability(predictionModel, example.features),
+    label: example.label
+  }));
+  const plattModel = fitPlattCalibration(validationPredictions);
+  if (!plattModel) return emptyMetrics();
 
-  // 3. EVALUATE METRICS EXCLUSIVELY ON TRUE OUT-OF-SAMPLE (OOS) SET
-  let oosWins = 0;
-  let oosLosses = 0;
-  let sumBrier = 0;
-  let sumLogLoss = 0;
-  let correctPredictionsCount = 0;
-
-  // Reliability diagram bins over OOS set (5 bins for granular statistical validity)
-  const bins = Array.from({ length: 5 }, (_, i) => ({
-    binMin: i * 0.2,
-    binMax: (i + 1) * 0.2,
-    binMidpoint: Number((i * 0.2 + 0.1).toFixed(2)),
-    predictions: [] as { prob: number; isWin: boolean }[],
+  const oosPredictions = oosSet.map(example => ({
+    rawProbability: predictRawProbability(predictionModel, example.features),
+    probability: 0,
+    label: example.label
   }));
 
-  for (const rec of oosSet) {
-    const isWin = rec.outcome === 'WIN';
-    if (isWin) oosWins++;
-    else oosLosses++;
+  let sumBrier = 0;
+  let sumRawBrier = 0;
+  let sumLogLoss = 0;
+  let correctPredictionsCount = 0;
+  const bins = Array.from({ length: 5 }, (_, index) => ({
+    binMidpoint: Number((index * 0.2 + 0.1).toFixed(2)),
+    predictions: [] as Array<{ prob: number; isWin: boolean }>
+  }));
 
-    const actualBinary = isWin ? 1 : 0;
-    const rawPred = rec.probability !== null && rec.probability !== undefined
-      ? Math.max(0.01, Math.min(0.99, rec.probability))
-      : 0.5;
+  oosPredictions.forEach(prediction => {
+    prediction.probability = applyPlattCalibration(plattModel, prediction.rawProbability);
+    sumBrier += Math.pow(prediction.probability - prediction.label, 2);
+    sumRawBrier += Math.pow(prediction.rawProbability - prediction.label, 2);
+    sumLogLoss -= prediction.label * Math.log(prediction.probability) +
+      (1 - prediction.label) * Math.log(1 - prediction.probability);
+    if ((prediction.probability >= 0.5) === (prediction.label === 1)) correctPredictionsCount++;
 
-    // Apply Platt Scaling learned on Validation Set to OOS prediction
-    const logit = Math.log(rawPred / (1 - rawPred));
-    const calibratedProb = 1.0 / (1.0 + Math.exp(plattA * logit + plattB));
-    const boundedProb = Math.max(0.001, Math.min(0.999, calibratedProb));
-
-    sumBrier += Math.pow(boundedProb - actualBinary, 2);
-    sumLogLoss -= (actualBinary * Math.log(boundedProb) + (1 - actualBinary) * Math.log(1 - boundedProb));
-
-    if ((boundedProb >= 0.5 && isWin) || (boundedProb < 0.5 && !isWin)) {
-      correctPredictionsCount++;
-    }
-
-    const binIndex = Math.min(4, Math.floor(boundedProb * 5));
-    bins[binIndex].predictions.push({ prob: boundedProb, isWin });
-  }
+    const binIndex = Math.min(4, Math.floor(prediction.probability * 5));
+    bins[binIndex].predictions.push({ prob: prediction.probability, isWin: prediction.label === 1 });
+  });
 
   const outOfSampleAccuracy = Number((correctPredictionsCount / oosSampleSize).toFixed(4));
   const brierScore = Number((sumBrier / oosSampleSize).toFixed(4));
+  const rawBrierScore = sumRawBrier / oosSampleSize;
   const logLoss = Number((sumLogLoss / oosSampleSize).toFixed(4));
-
-  // Compute True Expected Calibration Error (ECE) on True Out-of-Sample
   let weightedEce = 0;
-  const reliabilityDiagramBins: Array<{ binMidpoint: number; empiricalAccuracy: number; predictedConfidence: number; sampleCount: number }> = [];
+  const reliabilityDiagramBins: SetupRegimePerformanceMetrics['reliabilityDiagramBins'] = [];
 
   for (const bin of bins) {
     const count = bin.predictions.length;
-    if (count > 0) {
-      const meanPred = bin.predictions.reduce((s, p) => s + p.prob, 0) / count;
-      const winsInBin = bin.predictions.filter(p => p.isWin).length;
-      const empiricalAcc = winsInBin / count;
-      const absErr = Math.abs(meanPred - empiricalAcc);
-      weightedEce += (count / oosSampleSize) * absErr;
-      reliabilityDiagramBins.push({
-        binMidpoint: bin.binMidpoint,
-        empiricalAccuracy: Number(empiricalAcc.toFixed(4)),
-        predictedConfidence: Number(meanPred.toFixed(4)),
-        sampleCount: count,
-      });
-    }
+    if (count === 0) continue;
+    const meanPred = bin.predictions.reduce((sum, prediction) => sum + prediction.prob, 0) / count;
+    const empiricalAcc = bin.predictions.filter(prediction => prediction.isWin).length / count;
+    weightedEce += (count / oosSampleSize) * Math.abs(meanPred - empiricalAcc);
+    reliabilityDiagramBins.push({
+      binMidpoint: bin.binMidpoint,
+      empiricalAccuracy: Number(empiricalAcc.toFixed(4)),
+      predictedConfidence: Number(meanPred.toFixed(4)),
+      sampleCount: count
+    });
   }
 
   const expectedCalibrationError = Number(weightedEce.toFixed(4));
+  const oosWins = oosPredictions.filter(prediction => prediction.label === 1).length;
+  const oosLosses = oosSampleSize - oosWins;
+  const firstHalf = oosPredictions.slice(0, Math.floor(oosSampleSize / 2));
+  const secondHalf = oosPredictions.slice(Math.floor(oosSampleSize / 2));
+  const meanBrier = (predictions: typeof oosPredictions) =>
+    predictions.reduce((sum, prediction) => sum + Math.pow(prediction.probability - prediction.label, 2), 0) /
+    predictions.length;
+  const isCalibrationVerified =
+    oosSampleSize >= requiredOosSampleSize &&
+    oosWins >= MIN_CLASS_SAMPLES &&
+    oosLosses >= MIN_CLASS_SAMPLES &&
+    expectedCalibrationError <= 0.14 &&
+    brierScore <= 0.25 &&
+    logLoss <= 0.72 &&
+    brierScore <= rawBrierScore + 0.02 &&
+    Math.abs(meanBrier(firstHalf) - meanBrier(secondHalf)) <= 0.15;
+  const rawProbability = currentFeatureVector && predictionModel
+    ? predictRawProbability(predictionModel, currentFeatureVector)
+    : null;
+  const calibratedWinProbability = isCalibrationVerified && rawProbability !== null
+    ? applyPlattCalibration(plattModel, rawProbability)
+    : null;
+  const filledCount = segmentRecords.filter(record =>
+    record.executionStatus === 'EXECUTED_FILLED' || record.executionStatus === 'CLOSED_COMPLETED'
+  ).length;
+  const fillRate = sampleSize > 0 ? filledCount / sampleSize : null;
 
   // 4. OVERALL FINANCIAL & RISK METRICS (Across entire resolved record pool)
   let winCount = 0;
@@ -399,7 +613,6 @@ export function evaluateRealLearnedSegmentMetrics(
     }
   }
 
-  const rawProbability = Number((winCount / resolvedSampleSize).toFixed(4));
   const winRatePct = Number(((winCount / resolvedSampleSize) * 100).toFixed(1));
   const precision = outOfSampleAccuracy; // Item 2: Precision is strictly derived from unseen OOS holdout, NOT train win rate!
   const averageR = countR > 0 ? Number((sumR / countR).toFixed(2)) : null;
@@ -429,12 +642,9 @@ export function evaluateRealLearnedSegmentMetrics(
   }
 
   // 5. CALIBRATION VERIFICATION THRESHOLDS
-  const confidenceInterval = calculateWilsonConfidenceInterval(precision, oosSampleSize, 1.96);
-  const isCalibrationVerified =
-    oosSampleSize >= MIN_OOS_SIZE &&
-    expectedCalibrationError <= 0.14 &&
-    brierScore <= 0.25;
-
+  const confidenceInterval = calibratedWinProbability !== null && isCalibrationVerified
+    ? calculateOosPredictionInterval(calibratedWinProbability, oosPredictions)
+    : null;
   const calibrationStatus: SetupRegimePerformanceMetrics['calibrationStatus'] =
     isCalibrationVerified ? 'CALIBRATED' : 'UNCALIBRATED';
 
@@ -453,10 +663,12 @@ export function evaluateRealLearnedSegmentMetrics(
     trainSampleSize,
     valSampleSize,
     oosSampleSize,
+    requiredOosSampleSize,
+    fillRate,
     winCount,
     lossCount,
     rawProbability,
-    calibratedWinProbability: isCalibrationVerified ? precision : null,
+    calibratedWinProbability,
     winRatePct,
     precision,
     outOfSampleAccuracy,
@@ -739,8 +951,14 @@ export function computeCentralCalibratedProbability(input: BrainEvidenceInput): 
 
   const directionScore = directionalResult.directionScore;
 
-  // 2. SEGMENT METRICS & CALIBRATION (ITEM 1 & ITEM 2)
-  const segmentMetrics = evaluateRealLearnedSegmentMetrics(setupType, effectiveRegime, timeframe);
+  // 2. Fit the snapshot model, then calibrate its current prediction.
+  const currentFeatureVector = extractCurrentPredictionFeatures(input);
+  const segmentMetrics = evaluateRealLearnedSegmentMetrics(
+    setupType,
+    effectiveRegime,
+    timeframe,
+    currentFeatureVector
+  );
 
   const calibratedProbability = segmentMetrics.isCalibrationVerified && segmentMetrics.calibratedWinProbability !== null
     ? segmentMetrics.calibratedWinProbability
@@ -791,7 +1009,11 @@ export function computeCentralCalibratedProbability(input: BrainEvidenceInput): 
     calibratedProbability !== null &&
     calibratedProbability >= selectiveThreshold &&
     segmentMetrics.confidenceInterval !== null &&
-    segmentMetrics.confidenceInterval.lowerBound >= 0.48;
+    segmentMetrics.confidenceInterval.lowerBound >= 0.55 &&
+    (segmentMetrics.confidenceInterval.upperBound - segmentMetrics.confidenceInterval.lowerBound) <= 0.20 &&
+    segmentMetrics.expectedCalibrationError !== null &&
+    segmentMetrics.expectedCalibrationError <= 0.10 &&
+    segmentMetrics.oosSampleSize >= segmentMetrics.requiredOosSampleSize;
   const isEdgeApproved =
     expectedValueUsd !== null &&
     expectedValueUsd > 0 &&
@@ -823,15 +1045,25 @@ export function computeCentralCalibratedProbability(input: BrainEvidenceInput): 
 
   return {
     rawEvidenceScore: directionScore,
+    rawProbability: segmentMetrics.rawProbability,
     directionScore,
     calibratedWinProbability: calibratedProbability,
     isCalibrationVerified: segmentMetrics.isCalibrationVerified,
     calibrationVerified: segmentMetrics.isCalibrationVerified,
     calibrationStatus: segmentMetrics.calibrationStatus,
-    dataSufficient: segmentMetrics.resolvedSampleSize >= 15 && segmentMetrics.oosSampleSize >= 4,
+    dataSufficient:
+      segmentMetrics.isCalibrationVerified &&
+      segmentMetrics.trainSampleSize >= MIN_TRAIN_SAMPLES &&
+      segmentMetrics.valSampleSize >= MIN_VALIDATION_SAMPLES &&
+      segmentMetrics.oosSampleSize >= segmentMetrics.requiredOosSampleSize &&
+      segmentMetrics.rawProbability !== null,
     sampleSize: segmentMetrics.sampleSize,
     resolvedSampleSize: segmentMetrics.resolvedSampleSize,
+    requiredOosSampleSize: segmentMetrics.requiredOosSampleSize,
     oosSampleSize: segmentMetrics.oosSampleSize,
+    confidenceIntervalWidth: segmentMetrics.confidenceInterval
+      ? segmentMetrics.confidenceInterval.upperBound - segmentMetrics.confidenceInterval.lowerBound
+      : null,
     modelVersion: segmentMetrics.modelVersion,
     datasetVersion: segmentMetrics.datasetVersion,
     lastTrainedAt: segmentMetrics.lastTrainedAt,

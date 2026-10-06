@@ -1,4 +1,4 @@
-import { AnalysisResult, TradeHistory, BrainRoleType } from '../types/trading';
+import { AnalysisResult, TradeHistory, BrainRoleType, ModelDisagreementReport, MetaModelHealthState } from '../types/trading';
 import {
   predict30mTrendReversalPatternLayer,
   detectWhaleTrapAndLiquiditySweep,
@@ -13,6 +13,7 @@ import { realBayesianEngine } from './realBayesianEngine';
 import { centralTradeDatasetService } from './centralTradeDataset';
 import { macroContextBrainService } from './macroContextBrain';
 import { whaleStatisticalProofEngine } from './whaleStatisticalProofEngine';
+import { metaModelEnsembleEngine } from './metaModelEnsemble';
 
 /**
  * 🧠 معماری ۲۱ مغز پردازشی سیستم معاملاتی (Transparent 21-Brain Architecture)
@@ -266,11 +267,12 @@ export interface IndependentModelPrediction {
   modelId: string;
   nameFa: string;
   prediction: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-  rawProbabilityPct: number;
-  historicalPrecisionPct: number;
+  rawProbabilityPct: number | null;
+  historicalPrecisionPct: number | null;
   sampleSize: number;
   calibrationFactor: number;
-  regimePerformancePct: number;
+  regimePerformancePct: number | null;
+  healthState: MetaModelHealthState;
   correlationWithOtherModels: number; // 0 تا 1 (عدد کمتر = استقلال بیشتر)
   effectiveWeight: number;
 }
@@ -285,11 +287,13 @@ export interface PipelineArchitectureReport {
 
 export interface MultiBrainConsensusReport {
   timestamp: string;
+  timestampMs: number;
+  sourceTimestampMs: number | null;
   currentPrice: number;
   masterDirection: 'LONG' | 'SHORT' | 'HOLD';
   consensusScorePct: number; // اجماع کالیبره‌شده بر اساس مدل‌های مستقل
   confidenceGrade: 'DIAMOND_S_TIER' | 'GOLD_ALPHA' | 'TACTICAL_SCALP' | 'BLOCKED_RISK';
-  winProbabilityPct: number;
+  winProbabilityPct: number | null;
   riskProtectionActive: boolean;
   tradeFrequencyMonitoringOnly: boolean;
   drawdownLockoutActive: boolean;
@@ -299,6 +303,7 @@ export interface MultiBrainConsensusReport {
   
   pipelineArchitecture: PipelineArchitectureReport;
   independentModels: IndependentModelPrediction[];
+  modelDisagreement: ModelDisagreementReport;
   
   // ۲۱ بخش پردازشی
   brain1Macro: Brain1MacroTrend;
@@ -337,21 +342,81 @@ export interface MultiBrainConsensusReport {
   learningFeedbackStatusFa: string;
 }
 
+let latestMultiBrainReport: MultiBrainConsensusReport | null = null;
+
+function evaluateModelHealthState(
+  isCalibrated: boolean,
+  hasProbability: boolean,
+  sampleSize: number,
+  oosPrecisionPct: number | null
+): MetaModelHealthState {
+  if (
+    !isCalibrated ||
+    !hasProbability ||
+    oosPrecisionPct === null ||
+    !Number.isFinite(oosPrecisionPct) ||
+    sampleSize < 15 ||
+    oosPrecisionPct < 50
+  ) return 'SUSPENDED';
+  return sampleSize < 35 || oosPrecisionPct < 55 ? 'DEGRADED' : 'HEALTHY';
+}
+
+export function getLatestMultiBrainConsensusReport(
+  currentPrice: number,
+  sourceTimestampMs: number | null,
+  maxAgeMs = 3000
+): MultiBrainConsensusReport | null {
+  const report = latestMultiBrainReport;
+  if (
+    !report ||
+    !Number.isFinite(currentPrice) ||
+    currentPrice <= 0 ||
+    sourceTimestampMs === null ||
+    !Number.isFinite(sourceTimestampMs) ||
+    report.sourceTimestampMs === null ||
+    Math.abs(report.sourceTimestampMs - sourceTimestampMs) > 250 ||
+    Date.now() - report.timestampMs < 0 ||
+    Date.now() - report.timestampMs > maxAgeMs ||
+    Math.abs(report.currentPrice - currentPrice) / currentPrice > 0.0015
+  ) return null;
+  return report;
+}
+
 /**
  * اجرا و ارزیابی معماری ۲۱ مغزی با اجماع بر پایه مدل‌های آماری مستقل
  */
 export function runUnifiedMultiBrainEnsemble(
   analysis: Partial<AnalysisResult> | any,
   aiPrediction: any,
-  currentPrice = 88450,
+  currentPrice: number,
   recentHistory: TradeHistory[] = []
 ): MultiBrainConsensusReport {
   const datasetService = centralTradeDatasetService;
-  const p = currentPrice || analysis?.price || 88450;
-  const obi = analysis?.obi ?? 0;
-  const volPct = analysis?.volatilityPct ?? 1.4;
-  const rsi = analysis?.rsi ?? 52;
+  const p = currentPrice;
+  const obi = analysis?.realObiData?.obi;
+  const volPct = analysis?.volatilityPct;
+  const rsi = analysis?.rsi;
+  const setupType = analysis?.setupContext?.setupType || analysis?.setupType;
+  const timeframe = analysis?.timeframe;
+  const marketRegime = analysis?.marketRegime;
+  const candles = analysis?.candles;
+  if (
+    !Number.isFinite(p) || p <= 0 ||
+    typeof obi !== 'number' || !Number.isFinite(obi) ||
+    typeof volPct !== 'number' || !Number.isFinite(volPct) ||
+    typeof rsi !== 'number' || !Number.isFinite(rsi) ||
+    !setupType ||
+    !timeframe ||
+    !marketRegime ||
+    !Array.isArray(candles) ||
+    candles.length < 300
+  ) {
+    throw new Error('Multi-brain consensus requires a validated live price, 300 candles, regime, setup, order-flow, volatility, RSI, and timeframe.');
+  }
   const rawDirection = analysis?.direction === 'SHORT' ? 'SHORT' : (analysis?.direction === 'LONG' ? 'LONG' : 'HOLD');
+  if (rawDirection === 'HOLD') {
+    throw new Error('Multi-brain directional consensus cannot run without a live LONG or SHORT setup.');
+  }
 
   // ۱. مغز ۱: پردازشگر ویژگی روند و فرکتال (Feature Processor)
   const hurst = 0.58 + (Math.abs(obi) * 0.2);
@@ -493,12 +558,12 @@ export function runUnifiedMultiBrainEnsemble(
 
   // ۹. مغز ۹: مدل شبکه احتمالات بیزی (Statistical Bayesian Model - Item 10)
   const bayesResult = realBayesianEngine.inferPosterior({
-    setupType: analysis?.setupType || 'Pullback',
-    marketRegime: analysis?.marketRegime || 'TREND',
-    timeframe: (analysis?.timeframe as any) || '15m',
-    direction: rawDirection === 'SHORT' ? 'SHORT' : 'LONG',
+    setupType,
+    marketRegime,
+    timeframe,
+    direction: rawDirection,
     obi,
-    candles: analysis?.candles || [],
+    candles,
     volatilityPct: volPct,
     rsi
   });
@@ -691,30 +756,53 @@ export function runUnifiedMultiBrainEnsemble(
 
   const masterDir: 'LONG' | 'SHORT' = rawDirection === 'SHORT' ? 'SHORT' : 'LONG';
   const centralCalib = computeCentralCalibratedProbability({
-    trendBias: masterDir === 'SHORT' ? 'BEARISH' : 'BULLISH',
-    scoreLong: masterDir === 'LONG' ? 3.8 : 1.2,
-    scoreShort: masterDir === 'SHORT' ? 3.8 : 1.2,
+    trendBias: rawDirection === 'SHORT' ? 'BEARISH' : rawDirection === 'LONG' ? 'BULLISH' : 'NEUTRAL',
+    scoreLong: analysis?.scoreLong ?? 0,
+    scoreShort: analysis?.scoreShort ?? 0,
     obi,
     hurst,
     volatilityPct: volPct,
-    adx: 25,
+    adx: analysis?.adx ?? 0,
     rsi,
+    price: p,
+    ema20: analysis?.ema20Val,
+    ema50: analysis?.ema50Val,
+    ema200: analysis?.ema200Val,
     setupType: 'VWAP_MSS_CONTINUATION',
     marketRegime: garchRegime,
     candles: analysis?.candles || []
   });
 
+  const model1HealthState = evaluateModelHealthState(
+    centralCalib.isCalibrationVerified,
+    centralCalib.calibratedWinProbability !== null,
+    centralCalib.sampleSize,
+    centralCalib.outOfSamplePrecision === null ? null : centralCalib.outOfSamplePrecision * 100
+  );
+  const model2HealthState = evaluateModelHealthState(
+    bayesResult.status === 'CALIBRATED',
+    bayesResult.posteriorProbability !== null,
+    bayesResult.sampleSize,
+    bayesResult.status === 'CALIBRATED' ? bayesResult.calibrationMetrics.oosAccuracyPct : null
+  );
   const model1Central: IndependentModelPrediction = {
     modelId: 'M1_CENTRAL_CALIBRATED',
     nameFa: 'مدل کالیبره‌شده آماری مرکزی (Platt Scaling Engine)',
-    prediction: masterDir === 'SHORT' ? 'BEARISH' : 'BULLISH',
-    rawProbabilityPct: centralCalib.calibratedWinProbability !== null ? Math.round(centralCalib.calibratedWinProbability * 1000) / 10 : 50.0,
-    historicalPrecisionPct: centralCalib.outOfSamplePrecision ? Math.round(centralCalib.outOfSamplePrecision * 100) : 0,
+    prediction: centralCalib.rawProbability === null
+      ? 'NEUTRAL'
+      : masterDir === 'SHORT' ? 'BEARISH' : 'BULLISH',
+    rawProbabilityPct: centralCalib.isCalibrationVerified && centralCalib.calibratedWinProbability !== null
+      ? Math.round(centralCalib.calibratedWinProbability * 1000) / 10
+      : null,
+    historicalPrecisionPct: centralCalib.isCalibrationVerified && centralCalib.outOfSamplePrecision !== null
+      ? Math.round(centralCalib.outOfSamplePrecision * 100)
+      : null,
     sampleSize: centralCalib.sampleSize,
     calibrationFactor: centralCalib.isCalibrationVerified ? 1.0 : 0.0,
-    regimePerformancePct: centralCalib.outOfSamplePrecision ? Math.round(centralCalib.outOfSamplePrecision * 100) : 0,
+    regimePerformancePct: null,
+    healthState: model1HealthState,
     correlationWithOtherModels: 0.10, // مستقل
-    effectiveWeight: centralCalib.isCalibrationVerified ? 0.40 : 0.0,
+    effectiveWeight: model1HealthState === 'HEALTHY' ? 0.40 : 0.0,
   };
 
   const model2Bayesian: IndependentModelPrediction = {
@@ -723,13 +811,16 @@ export function runUnifiedMultiBrainEnsemble(
     prediction: (bayesResult.posteriorProbability ?? 0) >= 0.52
       ? (rawDirection === 'SHORT' ? 'BEARISH' : 'BULLISH')
       : 'NEUTRAL',
-    rawProbabilityPct: bayesResult.posteriorProbability !== null ? Math.round(bayesResult.posteriorProbability * 100) : 50.0,
-    historicalPrecisionPct: bayesResult.posteriorProbability !== null ? Math.round(bayesResult.posteriorProbability * 100) : 0,
+    rawProbabilityPct: bayesResult.status === 'CALIBRATED' && bayesResult.posteriorProbability !== null
+      ? Math.round(bayesResult.posteriorProbability * 100)
+      : null,
+    historicalPrecisionPct: bayesResult.status === 'CALIBRATED' ? bayesResult.calibrationMetrics.oosAccuracyPct : null,
     sampleSize: bayesResult.sampleSize,
     calibrationFactor: bayesResult.status === 'CALIBRATED' ? 1.0 : 0.0,
-    regimePerformancePct: bayesResult.posteriorProbability !== null ? Math.round(bayesResult.posteriorProbability * 100) : 0,
+    regimePerformancePct: null,
+    healthState: model2HealthState,
     correlationWithOtherModels: 0.20,
-    effectiveWeight: bayesResult.status === 'CALIBRATED' ? 0.30 : 0.0,
+    effectiveWeight: model2HealthState === 'HEALTHY' ? 0.30 : 0.0,
   };
 
   const model3Pattern: IndependentModelPrediction = {
@@ -738,50 +829,58 @@ export function runUnifiedMultiBrainEnsemble(
     prediction: (reversalAnalysis.reversalProbability ?? 0) >= 65
       ? (masterDir === 'LONG' ? 'BEARISH' : 'BULLISH')
       : (masterDir === 'SHORT' ? 'BEARISH' : 'BULLISH'),
-    rawProbabilityPct: reversalAnalysis.reversalProbability !== null ? Math.round(reversalAnalysis.reversalProbability) : 50,
-    historicalPrecisionPct: 0,
+    rawProbabilityPct: null,
+    historicalPrecisionPct: null,
     sampleSize: reversalAnalysis.reversalProbability !== null ? realResolvedSample : 0,
-    calibrationFactor: reversalAnalysis.reversalProbability !== null ? 0.7 : 0.0,
-    regimePerformancePct: 0,
+    calibrationFactor: 0,
+    regimePerformancePct: null,
+    healthState: 'SUSPENDED',
     correlationWithOtherModels: 0.25,
-    effectiveWeight: reversalAnalysis.reversalProbability !== null ? 0.15 : 0.0,
+    effectiveWeight: 0,
   };
 
   const model4Garch: IndependentModelPrediction = {
     modelId: 'M4_GARCH_REGIME',
     nameFa: 'مدل نوسان‌سنج پارامتری GARCH(1,1) (Real Parametric Volatility)',
-    prediction: garchRegime === 'SPIKE_TURBULENCE' ? 'NEUTRAL' : (masterDir === 'SHORT' ? 'BEARISH' : 'BULLISH'),
-    rawProbabilityPct: garchResult.regimeProbability !== null ? Math.round(garchResult.regimeProbability * 100) : 50,
-    historicalPrecisionPct: garchResult.oosForecastMape !== null ? Math.round(100 - Math.min(100, garchResult.oosForecastMape)) : 0,
+    prediction: 'NEUTRAL',
+    rawProbabilityPct: null,
+    historicalPrecisionPct: null,
     sampleSize: garchResult.sampleSize,
     calibrationFactor: garchResult.status === 'AVAILABLE' ? 1.0 : 0.0,
-    regimePerformancePct: garchResult.oosForecastMape !== null ? Math.round(100 - Math.min(100, garchResult.oosForecastMape)) : 0,
+    regimePerformancePct: null,
+    healthState: 'SUSPENDED',
     correlationWithOtherModels: 0.10,
-    effectiveWeight: garchResult.status === 'AVAILABLE' ? 0.15 : 0.0,
+    effectiveWeight: 0,
   };
 
   const independentModels = [model1Central, model2Bayesian, model3Pattern, model4Garch];
+  const activeModels = independentModels.filter(model =>
+    model.effectiveWeight > 0 &&
+    model.calibrationFactor > 0 &&
+    model.healthState === 'HEALTHY' &&
+    model.rawProbabilityPct !== null &&
+    model.historicalPrecisionPct !== null
+  );
+  const modelDisagreement = metaModelEnsembleEngine.evaluateModelDisagreement(activeModels.map(model => ({
+    modelId: model.modelId,
+    nameFa: model.nameFa,
+    direction: model.prediction === 'BULLISH' ? 'LONG' : model.prediction === 'BEARISH' ? 'SHORT' : 'NEUTRAL',
+    confidencePct: model.rawProbabilityPct,
+    effectiveWeightPct: model.effectiveWeight * (1 - model.correlationWithOtherModels * 0.5) * model.calibrationFactor * 100,
+  })));
+  const consensusScorePct = activeModels.length >= 2 && !modelDisagreement.vetoTriggered
+    ? 100 - modelDisagreement.disagreementIndex
+    : 0;
 
-  // محاسبه وزن‌دهی اجماع با خنثی‌سازی اثر همبستگی مدل‌ها (Decorrelation Weighting)
-  let totalWeightedProb = 0;
-  let totalEffectiveWeight = 0;
-
-  independentModels.forEach((m) => {
-    // ضریب عدم همبستگی (Decorrelation multiplier)
-    const decorrelatedWeight = m.effectiveWeight * (1 - m.correlationWithOtherModels * 0.5) * m.calibrationFactor;
-    totalWeightedProb += m.rawProbabilityPct * decorrelatedWeight;
-    totalEffectiveWeight += decorrelatedWeight;
-  });
-
-  const consensusScorePct = totalEffectiveWeight > 0
-    ? Math.min(92, Math.max(30, Math.round(totalWeightedProb / totalEffectiveWeight)))
-    : 50;
-
-  let confidenceGrade: MultiBrainConsensusReport['confidenceGrade'] = 'GOLD_ALPHA';
-  if (consensusScorePct >= 72 && !trapInfo.isTrapDetected) {
+  let confidenceGrade: MultiBrainConsensusReport['confidenceGrade'] = 'BLOCKED_RISK';
+  if (activeModels.length >= 2 && modelDisagreement.vetoTriggered) {
+    confidenceGrade = 'BLOCKED_RISK';
+  } else if (activeModels.length >= 2 && consensusScorePct >= 72 && !trapInfo.isTrapDetected) {
     confidenceGrade = 'DIAMOND_S_TIER';
-  } else if (garchRegime === 'SPIKE_TURBULENCE' || trapInfo.isTrapDetected) {
+  } else if (activeModels.length >= 2 && (garchRegime === 'SPIKE_TURBULENCE' || trapInfo.isTrapDetected)) {
     confidenceGrade = 'TACTICAL_SCALP';
+  } else if (activeModels.length >= 2) {
+    confidenceGrade = 'GOLD_ALPHA';
   }
 
   const coordinatorReport = brainPriorityCoordinator.getCoordinatorReport(p);
@@ -789,9 +888,9 @@ export function runUnifiedMultiBrainEnsemble(
   const pipelineArchitecture: PipelineArchitectureReport = {
     rawDataFeedsCount: 5,
     featureProcessorsCount: 17,
-    statisticalModelsCount: 4,
-    calibrationMethod: 'PLATT_SCALING_ECE',
-    pipelineFlowFa: 'RAW DATA (۵ فید) → FEATURE PROCESSORS (۱۷ ماژول) → MODEL PREDICTIONS (۴ مدل مستقل) → CALIBRATION (Platt Scaling) → CENTRAL PROBABILITY'
+    statisticalModelsCount: activeModels.length,
+    calibrationMethod: 'TIME_ORDERED_OOS_AND_DIRECTIONAL_DISAGREEMENT',
+    pipelineFlowFa: 'LIVE FEATURES → OOS-VALIDATED MODELS → DIRECTIONAL DISAGREEMENT RISK → WAIT ON VETO'
   };
 
   const proposalsListFa: MultiBrainConsensusReport['proposalsListFa'] = [
@@ -800,8 +899,8 @@ export function runUnifiedMultiBrainEnsemble(
       category: 'PREDICTION_ACCURACY',
       titleFa: '۱. ساختار اجماع بر پایه ۴ مدل آماری مستقل (Decorrelated Model Consensus)',
       status: 'EXECUTED_LIVE',
-      descriptionFa: 'محاسبه درصد اجماع با وزن‌دهی به ۴ مدل آماری مستقل (کالیبراسیون مرکزی، بیزی خرد، شباهت الگو، GARCH) و کسر همبستگی همپوشانی ویژگی‌ها.',
-      impactFa: 'حذف جمع اعداد دستی و دستیابی به احتمال برد کاملاً کالیبره‌شده.'
+      descriptionFa: 'اجماع فقط از مدل‌های دارای احتمال و دقت OOS استفاده می‌کند؛ اختلاف جهت‌ها جداگانه اندازه‌گیری می‌شود و GARCH/الگو بدون اعتبارسنجی در رأی جهت‌دار وارد نمی‌شوند.',
+      impactFa: 'اختلاف شدید Brainها رأی را وتو می‌کند؛ میانگین احتمال‌ها به‌تنهایی مجوز معامله نیست.'
     },
     {
       id: 'prop_transparent_pipeline',
@@ -829,13 +928,17 @@ export function runUnifiedMultiBrainEnsemble(
     }
   ];
 
-  return {
+  const report: MultiBrainConsensusReport = {
     timestamp: new Date().toLocaleTimeString('fa-IR'),
+    timestampMs: Date.now(),
+    sourceTimestampMs: analysis?.canonicalSnapshot?.timestampUtc ?? analysis?.realObiData?.timestamp ?? null,
     currentPrice: p,
-    masterDirection: masterDir,
+    masterDirection: modelDisagreement.vetoTriggered ? 'HOLD' : masterDir,
     consensusScorePct,
     confidenceGrade,
-    winProbabilityPct: centralCalib.calibratedWinProbability !== null ? Math.round(centralCalib.calibratedWinProbability * 1000) / 10 : 50.0,
+    winProbabilityPct: !modelDisagreement.vetoTriggered && centralCalib.isCalibrationVerified && centralCalib.calibratedWinProbability !== null
+      ? Math.round(centralCalib.calibratedWinProbability * 1000) / 10
+      : null,
     riskProtectionActive: true,
     tradeFrequencyMonitoringOnly: true,
     drawdownLockoutActive: true,
@@ -856,6 +959,7 @@ export function runUnifiedMultiBrainEnsemble(
     },
     pipelineArchitecture,
     independentModels,
+    modelDisagreement,
     
     brain1Macro,
     brain2Liquidity,
@@ -881,6 +985,8 @@ export function runUnifiedMultiBrainEnsemble(
 
     coordinatorReport,
     proposalsListFa,
-    learningFeedbackStatusFa: `🧠 اجماع کالیبره‌شده بر پایه ۴ مدل آماری مستقل با ضریب ${consensusScorePct}٪ فعال است | جریان: ${pipelineArchitecture.pipelineFlowFa}`
+    learningFeedbackStatusFa: `🧠 ${activeModels.length} مدل دارای اعتبارسنجی OOS فعال است؛ اختلاف ${modelDisagreement.disagreementIndex}٪، ضریب اجماع ${consensusScorePct}٪ | ${pipelineArchitecture.pipelineFlowFa}`
   };
+  latestMultiBrainReport = report;
+  return report;
 }

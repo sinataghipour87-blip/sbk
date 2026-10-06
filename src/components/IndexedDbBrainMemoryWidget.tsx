@@ -132,7 +132,7 @@ export const IndexedDbBrainMemoryWidget: React.FC<Props> = ({
             </div>
             <div className="bg-[#041124] p-2 rounded-lg border border-indigo-950">
               <span className="text-[10px] text-slate-400 block mb-0.5 font-sans">امتیاز اجماع:</span>
-              <span className="text-xs font-bold text-emerald-300">{savedState?.consensusScorePct || 88}٪</span>
+              <span className="text-xs font-bold text-emerald-300">{savedState?.consensusScorePct ?? 0}٪</span>
             </div>
             <div className="bg-[#041124] p-2 rounded-lg border border-indigo-950">
               <span className="text-[10px] text-slate-400 block mb-0.5 font-sans">سناریوی فعال:</span>

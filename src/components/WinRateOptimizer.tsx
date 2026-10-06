@@ -19,6 +19,14 @@ interface WinRateOptimizerProps {
   analysis?: AnalysisResult | null;
 }
 
+interface CentralProbabilityEvaluation {
+  statusColor: string;
+  statusPersian: string;
+  modelProbability: number | null;
+  criteriaChecks: Array<{ name: string; passed: boolean }>;
+  optimizedLevels: { strategy: string };
+}
+
 export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
   history,
   config,
@@ -28,38 +36,46 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
   const safeHistory = history || [];
   const winCount = safeHistory.filter((h) => h.pnlUsd > 0).length;
   const totalCount = safeHistory.length;
-  const currentWinRate = totalCount > 0 ? (winCount / totalCount) * 100 : 91.2;
+  const currentWinRate = totalCount > 0 ? (winCount / totalCount) * 100 : null;
 
   // Recursive pattern analysis: detect loss factors
   const lossTrades = safeHistory.filter((h) => h.pnlUsd < 0);
   const avoidedLossCount = Math.max(7, lossTrades.length * 3);
 
   const [isCalibrating, setIsCalibrating] = useState(false);
-  const [pythonCalibration, setPythonCalibration] = useState<any | null>(null);
+  const [probabilityModelEvaluation, setProbabilityModelEvaluation] = useState<CentralProbabilityEvaluation | null>(null);
 
-  const runPythonCalibration = async () => {
+  const runProbabilityModelEvaluation = async () => {
     if (!analysis) return;
     setIsCalibrating(true);
     try {
       const calib = computeCentralCalibratedProbability({
-        trendBias: (analysis as any).signalType === 'LONG' || (analysis as any).tradeDirection === 'LONG' ? 'BULLISH' : 'BEARISH',
-        scoreLong: 3.5,
-        scoreShort: 1.5,
-        obi: analysis.obi || 0.1,
-        hurst: 0.55,
-        volatilityPct: analysis.volatilityPct || 1.4,
-        adx: 25,
-        rsi: 50,
+        trendBias: analysis.direction === 'LONG' ? 'BULLISH' : 'BEARISH',
+        scoreLong: analysis.scoreLong,
+        scoreShort: analysis.scoreShort,
+        obi: analysis.obi ?? 0,
+        hurst: 0.5,
+        volatilityPct: analysis.volatilityPct ?? 0,
+        adx: analysis.adx,
+        rsi: analysis.rsi,
+        price: analysis.price,
+        ema20: analysis.ema20Val,
+        ema50: analysis.ema50Val,
+        ema200: analysis.ema200Val,
+        setupType: analysis.setupContext?.setupType,
+        marketRegime: analysis.marketRegime,
       });
-      setPythonCalibration({
-        statusColor: '#10b981',
-        statusPersian: 'کالیبره‌شده آماری',
-        choppinessIndex: '42.5',
-        monteCarloWinRate: calib.calibratedWinProbability ? Math.round(calib.calibratedWinProbability * 100) : 75,
+      const isCalibrated = calib.calibratedWinProbability !== null;
+      setProbabilityModelEvaluation({
+        statusColor: isCalibrated ? '#10b981' : '#f59e0b',
+        statusPersian: isCalibrated ? 'مدل کالیبره‌شده و تایید OOS' : 'OOS کافی نیست؛ احتمال نامشخص',
+        modelProbability: calib.calibratedWinProbability === null
+          ? null
+          : Math.round(calib.calibratedWinProbability * 100),
         criteriaChecks: [
-          { name: 'همگرایی OBI و CVD', passed: true },
-          { name: 'سوئیپ نقدینگی تاییدشده', passed: true },
-          { name: 'نسبت Risk/Reward >= 1:2.5', passed: true }
+          { name: 'حجم داده آموزش/Validation/OOS کافی', passed: calib.dataSufficient },
+          { name: 'حد پایین CI حداقل ۵۵٪', passed: (calib.confidenceInterval?.lowerBound ?? 0) >= 0.55 },
+          { name: 'ECE حداکثر ۱۰٪', passed: (calib.expectedCalibrationError ?? 1) <= 0.10 }
         ],
         optimizedLevels: {
           strategy: 'ورود بر اساس سوئیپ نقدینگی و حد ضرر قطعی زیر کندل سوئیپ'
@@ -73,8 +89,8 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
   };
 
   useEffect(() => {
-    if (analysis && !pythonCalibration) {
-      runPythonCalibration();
+    if (analysis && !probabilityModelEvaluation) {
+      runProbabilityModelEvaluation();
     }
   }, [analysis?.price]);
 
@@ -121,7 +137,7 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
               </div>
             </div>
             <button
-              onClick={runPythonCalibration}
+              onClick={runProbabilityModelEvaluation}
               disabled={isCalibrating}
               className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-200 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shrink-0 disabled:opacity-50"
             >
@@ -138,13 +154,13 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
             <span className="text-[11px] text-slate-300 block mb-1">نرخ برد واقعی سیستم SB:</span>
             <div className="flex items-baseline justify-between">
               <span className={`text-xl font-mono font-extrabold ${currentWinRate >= 90 ? 'text-amber-300' : 'text-emerald-400'}`}>
-                {currentWinRate.toFixed(1)}%
+                {currentWinRate !== null ? `${currentWinRate.toFixed(1)}%` : 'N/A'}
               </span>
               <span className="text-[10px] text-slate-400 font-mono">
                 ({winCount} برد از {totalCount} معامله)
               </span>
             </div>
-            <p className="text-[10px] text-emerald-400 mt-1">تاییدشده با کالیبراسیون بازگشتی پایتون</p>
+            <p className="text-[10px] text-slate-400 mt-1">محاسبه‌شده از نتایج واقعی ثبت‌شده</p>
           </div>
 
           {/* 2. Blocked Low-Prob Signals */}
@@ -164,7 +180,7 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
             <span className="text-[11px] text-slate-300 block mb-1">مکانیزم تسویه سریع TP1:</span>
             <div className="flex items-baseline justify-between">
               <span className="text-lg font-mono font-bold text-amber-300">
-                احتمال لمس ۹۲.۵٪
+                حداقل آستانه: {config.minWinProbability}٪
               </span>
               <span className="text-[10px] text-emerald-400 font-mono">Free-Risk</span>
             </div>
@@ -177,35 +193,38 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
             <div className="flex items-center gap-1.5 mt-0.5">
               <Sparkles className="w-4 h-4 text-emerald-400 animate-spin" />
               <span className="text-xs font-bold text-emerald-300">
-                {pythonCalibration ? `کالیبره‌شده (${pythonCalibration.calibratedWinRate}٪)` : 'بهینه‌ساز پویا فعال'}
+                {probabilityModelEvaluation
+                  ? probabilityModelEvaluation.modelProbability !== null
+                    ? `احتمال OOS: ${probabilityModelEvaluation.modelProbability}٪`
+                    : 'UNVALIDATED'
+                  : 'در انتظار محاسبه مدل'}
               </span>
             </div>
-            <p className="text-[10px] text-slate-400 mt-1">شبیه‌سازی ۱۰۰۰ مسیره مونت‌کارلو</p>
+            <p className="text-[10px] text-slate-400 mt-1">Snapshot features → Prediction Model → OOS Calibration</p>
           </div>
         </div>
 
-        {/* Python Live Verification Panel */}
-        {pythonCalibration && (
+        {/* Central Probability Model Verification */}
+        {probabilityModelEvaluation && (
           <div className="bg-[#010915] border border-slate-800 rounded-xl p-3.5 space-y-2.5 text-xs">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-800/80">
               <div className="flex items-center gap-2">
                 <Layers className="w-4 h-4 text-cyan-400" />
                 <span className="font-bold text-slate-200">
-                  ارزیابی موتور پایتون بر روی کندل‌های زنده:
+                  ارزیابی مدل مرکزی روی Snapshot فعلی:
                 </span>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono" style={{ backgroundColor: `${pythonCalibration.statusColor}22`, color: pythonCalibration.statusColor, border: `1px solid ${pythonCalibration.statusColor}55` }}>
-                  {pythonCalibration.statusPersian}
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold font-mono" style={{ backgroundColor: `${probabilityModelEvaluation.statusColor}22`, color: probabilityModelEvaluation.statusColor, border: `1px solid ${probabilityModelEvaluation.statusColor}55` }}>
+                  {probabilityModelEvaluation.statusPersian}
                 </span>
               </div>
               <div className="text-[11px] text-slate-300 font-mono flex items-center gap-3">
-                <span>شاخص نوسان (Chop): <b className="text-cyan-300">{pythonCalibration.choppinessIndex}</b></span>
-                <span>تایید مونت‌کارلو: <b className="text-emerald-300">{pythonCalibration.monteCarloWinRate}%</b></span>
+                <span>احتمال مدل کالیبره‌شده: <b className="text-emerald-300">{probabilityModelEvaluation.modelProbability !== null ? `${probabilityModelEvaluation.modelProbability}٪` : 'UNVALIDATED'}</b></span>
               </div>
             </div>
 
             {/* Criteria Badges */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
-              {pythonCalibration.criteriaChecks.map((crit: any, idx: number) => (
+              {probabilityModelEvaluation.criteriaChecks.map((crit, idx) => (
                 <div key={`crit_${idx}`} className={`p-2 rounded-lg border text-[11px] flex items-center justify-between ${crit.passed ? 'bg-emerald-950/20 border-emerald-900/60 text-emerald-300' : 'bg-rose-950/20 border-rose-900/60 text-rose-300'}`}>
                   <span className="font-medium">{crit.name}</span>
                   <span className="font-bold">{crit.passed ? 'تایید ✓' : 'رد ✗'}</span>
@@ -215,7 +234,7 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
 
             {/* Strategy Rule Explanation */}
             <p className="text-[11px] text-slate-300 leading-relaxed bg-[#020d1c] p-2 rounded-lg border border-slate-800">
-              💡 <b className="text-amber-300">روش تضمین نرخ برد بالای ۹۰٪ در دنیای واقعی:</b> {pythonCalibration.optimizedLevels.strategy}
+              💡 <b className="text-amber-300">راهبرد پیشنهادی بر اساس ارزیابی مدل:</b> {probabilityModelEvaluation.optimizedLevels.strategy}
             </p>
           </div>
         )}
@@ -270,4 +289,3 @@ export const WinRateOptimizerComponent: React.FC<WinRateOptimizerProps> = ({
     </CollapsibleCard>
   );
 };
-

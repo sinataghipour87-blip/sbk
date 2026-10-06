@@ -107,12 +107,12 @@ export const DecisionPipelineWidget: React.FC<DecisionPipelineWidgetProps> = ({
                 <span className="text-xs font-bold block">
                   {isWaitState
                     ? '🛡️ استراتژی انضباطی: در انتظار شکل‌گیری موقعیت با برتری آماری (Edge)'
-                    : '🎯 تایید نهایی: موقعیت دارای امید ریاضی مثبت و برتری آماری کالیبره‌شده'}
+                    : '🎯 تایید نهایی: موقعیت دارای امید ریاضی و احتمال تاییدشده OOS'}
                 </span>
                 <span className="text-[10px] text-slate-400 block mt-0.5">
                   {isWaitState
                     ? (pipeline?.waitReasonFa || 'بازار فاقد ستاپ پرایس‌اکشن با ریسک به ریوارد توجیه‌پذیر است.')
-                    : `جهت ${pipeline?.direction === 'LONG' ? 'خرید (LONG)' : 'فروش (SHORT)'} | امید ریاضی: +$${pipeline?.expectedValueUsd?.toFixed(2)} | شانس برد: ${((pipeline?.calibratedWinProb || 0.7) * 100).toFixed(0)}٪`}
+                    : `جهت ${pipeline?.direction === 'LONG' ? 'خرید (LONG)' : 'فروش (SHORT)'} | امید ریاضی: ${pipeline?.expectedValueUsd !== null && pipeline?.expectedValueUsd !== undefined ? `$${pipeline.expectedValueUsd.toFixed(2)}` : 'N/A'} | احتمال برد: ${pipeline?.calibratedWinProb !== null && pipeline?.calibratedWinProb !== undefined ? `${(pipeline.calibratedWinProb * 100).toFixed(0)}٪` : 'UNVALIDATED'}`}
                 </span>
               </div>
             </div>
@@ -121,23 +121,30 @@ export const DecisionPipelineWidget: React.FC<DecisionPipelineWidgetProps> = ({
               <div className="bg-[#020b17] px-2.5 py-1 rounded-lg border border-cyan-900/60 text-center">
                 <span className="text-[9px] text-cyan-400 block font-bold">Trade Quality:</span>
                 <span className="font-bold text-slate-100">
-                  {analysis?.calibratedMetadata?.tradeQualityScore?.totalScore ?? (analysis?.confScore ? Math.round(analysis.confScore * 20) : 85)}/100
+                  {analysis?.calibratedMetadata?.tradeQualityScore?.totalScore ?? 'UNVALIDATED'}
                 </span>
               </div>
 
               <div className="bg-[#020b17] px-2.5 py-1 rounded-lg border border-cyan-900/60 text-center">
-                <span className="text-[9px] text-cyan-400 block font-bold">Calibrated Win Probability:</span>
+                <span className="text-[9px] text-cyan-400 block font-bold">OOS-Calibrated Probability / 95% CI:</span>
                 <span className="font-bold text-cyan-300">
                   {pipeline?.calibratedWinProb !== null && pipeline?.calibratedWinProb !== undefined
                     ? `${(pipeline.calibratedWinProb * 100).toFixed(1)}%`
                     : 'در انتظار OOS'}
+                </span>
+                <span className="block text-[9px] text-slate-400">
+                  {analysis?.calibratedMetadata?.confidenceInterval &&
+                   analysis.calibratedMetadata.confidenceIntervalWidth !== null &&
+                   analysis.calibratedMetadata.expectedCalibrationError !== null
+                    ? `Lower ${(analysis.calibratedMetadata.confidenceInterval.lowerBound * 100).toFixed(1)}% | Width ${(analysis.calibratedMetadata.confidenceIntervalWidth * 100).toFixed(1)}% | ECE ${(analysis.calibratedMetadata.expectedCalibrationError * 100).toFixed(1)}% | OOS ${analysis.calibratedMetadata.oosSampleSize}/${analysis.calibratedMetadata.requiredOosSampleSize}`
+                    : 'CI / Error / Sample: UNVALIDATED'}
                 </span>
               </div>
 
               <div className="bg-[#020b17] px-2.5 py-1 rounded-lg border border-cyan-900/60 text-center">
                 <span className="text-[9px] text-cyan-400 block font-bold">Expected Value:</span>
                 <span className={`font-bold ${(pipeline?.expectedValueUsd || 0) > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
-                  {pipeline?.expectedR !== null && pipeline?.expectedR !== undefined && pipeline?.expectedR > 0 ? `+${pipeline.expectedR}R` : '+0.38R'}
+                  {pipeline?.expectedR !== null && pipeline?.expectedR !== undefined ? `${pipeline.expectedR > 0 ? '+' : ''}${pipeline.expectedR}R` : 'N/A'}
                   {' '}<span className="text-[10px] text-slate-400">({(pipeline?.expectedValueUsd || 0) > 0 ? '+' : ''}${pipeline?.expectedValueUsd?.toFixed(2) || '0.00'})</span>
                 </span>
               </div>
@@ -211,6 +218,60 @@ export const DecisionPipelineWidget: React.FC<DecisionPipelineWidgetProps> = ({
                 <span className="text-cyan-400 font-bold">تحلیل فرامدل: </span>
                 {pipeline.masterDecision.masterVerdictFa}
               </div>
+              {pipeline.masterDecision.metaLearnerOutput && (
+                <div className="mt-2 text-[10px] text-slate-300 bg-[#010811] p-2 rounded-lg border border-cyan-950/80">
+                  Return: {pipeline.masterDecision.metaLearnerOutput.expectedReturnR === null
+                    ? '—'
+                    : `${pipeline.masterDecision.metaLearnerOutput.expectedReturnR.toFixed(2)}R`}
+                  {' · '}MAE: {pipeline.masterDecision.metaLearnerOutput.expectedMaeR === null
+                    ? '—'
+                    : `${pipeline.masterDecision.metaLearnerOutput.expectedMaeR.toFixed(2)}R`}
+                  {' · '}MFE: {pipeline.masterDecision.metaLearnerOutput.expectedMfeR === null
+                    ? '—'
+                    : `${pipeline.masterDecision.metaLearnerOutput.expectedMfeR.toFixed(2)}R`}
+                  {' · '}مدت تاریخی: {pipeline.masterDecision.metaLearnerOutput.expectedDurationSeconds === null
+                    ? '—'
+                    : `${pipeline.masterDecision.metaLearnerOutput.expectedDurationSeconds}s`}
+                </div>
+              )}
+
+              {pipeline.opportunitySurface && (
+                <details className="mt-2 rounded-lg border border-indigo-900/70 bg-[#010811] p-2">
+                  <summary className="cursor-pointer text-[10px] font-bold text-indigo-200">
+                    Opportunity Surface · {pipeline.opportunitySurface.mode} · آمادگی {pipeline.opportunitySurface.readinessPct}٪
+                    {' — '}
+                    {pipeline.opportunitySurface.entryZone
+                      ? `زون $${pipeline.opportunitySurface.entryZone.min.toFixed(2)}–$${pipeline.opportunitySurface.entryZone.max.toFixed(2)}`
+                      : 'زون ورود هنوز معتبر نیست'}
+                    {' · '}
+                    {pipeline.opportunitySurface.optimalEntryPrice !== null
+                      ? `ورود بهینه $${pipeline.opportunitySurface.optimalEntryPrice.toFixed(2)}`
+                      : 'ورود بهینه نامشخص'}
+                  </summary>
+                  <p className="my-2 text-[10px] text-amber-300">
+                    {pipeline.opportunitySurface.nearMissReasonFa ?? 'Trigger و شرایط اجرا تایید شدند.'}
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-1">
+                    {pipeline.opportunitySurface.points.map((point, index) => (
+                      <div key={`${point.entryPrice}-${index}`} className="rounded border border-slate-800 p-1.5 text-[9px] text-slate-300">
+                        <div className="font-bold text-cyan-300">${point.entryPrice.toFixed(2)}</div>
+                        <div>EV: {point.expectedValueR === null ? '—' : `${point.expectedValueR.toFixed(3)}R`}</div>
+                        <div>Meta P (مشترک نقاط): {point.calibratedProbabilityPct === null ? '—' : `${point.calibratedProbabilityPct.toFixed(1)}٪`}</div>
+                        <div>Fill: {point.fillProbabilityPct === null ? '—' : `${point.fillProbabilityPct.toFixed(1)}٪`}</div>
+                        <div>Slip: {point.slippageBps === null ? '—' : `${point.slippageBps.toFixed(2)} bps`}</div>
+                        <div>Stop/Reward: {point.stopDistance === null || point.reward === null
+                          ? '—'
+                          : `$${point.stopDistance.toFixed(2)} / $${point.reward.toFixed(2)}`}</div>
+                        <div>Liquidity: {point.liquidityUsd === null ? '—' : `$${point.liquidityUsd.toFixed(0)}`}</div>
+                        <div>MAE/MFE: {point.expectedMaeR === null || point.expectedMfeR === null
+                          ? '—'
+                          : `${point.expectedMaeR.toFixed(2)}R / ${point.expectedMfeR.toFixed(2)}R`}</div>
+                        <div>مدت تاریخی: {point.expectedDurationSeconds === null ? '—' : `${point.expectedDurationSeconds}s`}</div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
           )}
 

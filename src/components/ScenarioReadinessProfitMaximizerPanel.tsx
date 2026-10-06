@@ -170,8 +170,8 @@ export const ScenarioReadinessProfitMaximizerPanel: React.FC<Props> = ({
             </div>
 
             <div className="bg-[#041328] p-2.5 rounded-xl border border-emerald-950">
-              <span className="text-[10px] text-slate-400 block mb-0.5 font-sans">احتمال تداوم موج:</span>
-              <span className="text-base font-black text-emerald-400">{profitState.continuationProbabilityPct}٪</span>
+              <span className="text-[10px] text-slate-400 block mb-0.5 font-sans">HEURISTIC SCORE تداوم موج:</span>
+              <span className="text-base font-black text-emerald-400">{profitState.continuationHeuristicScore}/100</span>
             </div>
           </div>
 

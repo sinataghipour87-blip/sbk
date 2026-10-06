@@ -2,12 +2,37 @@ import { AnalysisResult, TradeHistory } from '../types/trading';
 import { newsShockFirewallService } from './newsShockFirewall';
 import { rootCauseAnalysisEngineService, PositionLossCauseType } from './rootCauseAnalysisEngine';
 import { dataProvenanceLayerService } from './dataProvenanceLayer';
-import { evaluateRealLearnedSegmentMetrics } from './centralProbabilityEngine';
+import {
+  evaluateRealLearnedSegmentMetrics,
+  extractCurrentPredictionFeatures,
+} from './centralProbabilityEngine';
 
 export interface EntryValidationResult {
   shouldEnter: boolean;
   adjustedConfidence: number;
   reason: string;
+}
+
+function getSnapshotFeatureVector(
+  analysis: Partial<AnalysisResult> | null | undefined,
+  direction: 'LONG' | 'SHORT',
+  price?: number
+) {
+  if (!analysis) return null;
+  return extractCurrentPredictionFeatures({
+    trendBias: direction === 'LONG' ? 'BULLISH' : 'BEARISH',
+    scoreLong: analysis.scoreLong ?? Number.NaN,
+    scoreShort: analysis.scoreShort ?? Number.NaN,
+    obi: analysis.obi ?? Number.NaN,
+    hurst: 0.5,
+    volatilityPct: analysis.volatilityPct ?? Number.NaN,
+    adx: analysis.adx ?? Number.NaN,
+    rsi: analysis.rsi ?? Number.NaN,
+    price: price ?? analysis.price,
+    ema20: analysis.ema20Val,
+    ema50: analysis.ema50Val,
+    ema200: analysis.ema200Val,
+  });
 }
 
 export function validatePrecisionEntry(
@@ -2454,13 +2479,13 @@ export interface WaveStageDetails {
   currentStage: WaveStage;
   stageNameFa: string;
   stageDescriptionFa: string;
-  stageConfidencePct: number;
+  stageConfidencePct: number | null;
   isTradeableStage: boolean;
   stageAgeCandles: number;
 }
 
 export interface WavePredictionMetrics {
-  continuationScore: number;          // Feature/Score 0-100 (Heuristic momentum score, NOT a probability)
+  continuationScore: number | null;
   continuationProbabilityPct: number | null; // Calibrated empirical probability exclusively, or null
   expectedMoveMagnitudeAtr: number;   // B: Expected move magnitude in ATR multiples
   expectedMoveMagnitudePct: number;   // Expected move in %
@@ -2481,13 +2506,22 @@ export interface EntryCandidate {
   takeProfitPrice: number;
   expectedMfePct: number;
   expectedMaePct: number;
-  tpProbabilityPct: number;
-  slProbabilityPct: number;
+  tpProbabilityPct: number | null;
+  slProbabilityPct: number | null;
+  calibratedWinProbability: number | null;
+  confidenceInterval: { lowerBound: number; upperBound: number } | null;
+  confidenceIntervalWidth: number | null;
+  calibrationError: number | null;
+  sampleSize: number;
+  requiredOosSampleSize: number;
+  historicalMaePct: number | null;
+  historicalMfePct: number | null;
+  fillRate: number | null;
   expectedR: number;
   expectedTimeToTargetMinutes: number;
   expectedSlippageUsd: number;
   expectedFeeUsd: number;
-  expectedValueUsd: number;
+  expectedValueUsd: number | null;
   isQualified: boolean;
 }
 
@@ -2548,13 +2582,19 @@ export interface WaveEngineFullResult {
    const adx = analysis?.adx ?? 22;
    const regime = analysis?.marketRegime || 'TREND';
  
-   const metrics15m = evaluateRealLearnedSegmentMetrics('WAVE_STAGE_EVAL', regime, '15m');
+   const direction = analysis?.direction === 'SHORT' ? 'SHORT' : 'LONG';
+   const features = getSnapshotFeatureVector(analysis, direction, price);
+   const metrics15m = evaluateRealLearnedSegmentMetrics('WAVE_STAGE_EVAL', regime, '15m', features, direction);
    const isCalibrated = metrics15m.calibrationStatus === 'CALIBRATED';
  
    let currentStage: WaveStage = 'EARLY_EXPANSION';
-   let stageConfidencePct = isCalibrated && metrics15m.calibratedWinProbability !== null ? Math.round(metrics15m.calibratedWinProbability * 100) : 82;
+   let stageConfidencePct = isCalibrated && metrics15m.calibratedWinProbability !== null
+     ? Math.round(metrics15m.calibratedWinProbability * 100)
+     : null;
    let stageNameFa = 'آغاز گام انبساطی (EARLY_EXPANSION)';
-   let stageDescriptionFa = 'مبتنی بر تحلیل داده‌های تاریخی OOS در تایم‌فریم‌های متعدد.';
+   let stageDescriptionFa = stageConfidencePct !== null
+     ? 'احتمال مرحله با مدل مبتنی بر Snapshot و داده مستقل OOS برآورد شده است.'
+     : 'مرحله ساختاری از ویژگی‌های Snapshot جاری تشخیص داده شد؛ مدل احتمالاتی معتبر در دسترس نیست.';
    let isTradeableStage = true;
  
    const distVwapPct = Math.abs((price - vwap) / vwap) * 100;
@@ -2600,21 +2640,23 @@ export interface WaveEngineFullResult {
    const price = analysis?.price || 88450;
    const atrPct = (atr / price) * 100;
  
-   const segment15 = evaluateRealLearnedSegmentMetrics('WAVE_CONTINUATION', regime, '15m');
-   const segment30 = evaluateRealLearnedSegmentMetrics('WAVE_CONTINUATION', regime, '30m');
+   const direction = analysis?.direction === 'SHORT' ? 'SHORT' : 'LONG';
+   const features = getSnapshotFeatureVector(analysis, direction, price);
+   const segment15 = evaluateRealLearnedSegmentMetrics('WAVE_CONTINUATION', regime, '15m', features, direction);
+   const segment30 = evaluateRealLearnedSegmentMetrics('WAVE_CONTINUATION', regime, '30m', features, direction);
  
    const continuationProbabilityPct: number | null = segment15.calibratedWinProbability !== null
      ? Math.round(segment15.calibratedWinProbability * 100)
      : (segment30.calibratedWinProbability !== null ? Math.round(segment30.calibratedWinProbability * 100) : null);
  
-   const continuationScore = continuationProbabilityPct !== null ? continuationProbabilityPct : 68;
+   const continuationScore = continuationProbabilityPct;
    const expectedMoveMagnitudeAtr = segment15.averageR !== null ? Math.max(1.5, segment15.averageR) : 2.2;
    const expectedMoveMagnitudePct = Math.round((expectedMoveMagnitudeAtr * atrPct) * 100) / 100;
    const expectedDurationMinutes = segment15.avgTimeToTargetSec !== null ? Math.round(segment15.avgTimeToTargetSec / 60) : 45;
  
    const summaryTextFa = continuationProbabilityPct !== null
      ? `موتور امواج کالیبره‌شده OOS: احتمال ادامه ${continuationProbabilityPct}٪ | حرکت باقی‌مانده ${expectedMoveMagnitudeAtr} ATR (${expectedMoveMagnitudePct}٪) | مدت ${expectedDurationMinutes} دقیقه.`
-     : `موتور امواج: فاقد داده کافی OOS برای احتمال قطعی (امتیاز ویژگی: ${continuationScore}/100).`;
+     : 'موتور امواج: UNCALIBRATED؛ احتمال یا امتیاز جایگزین تولید نشد.';
  
    return {
      continuationScore,
@@ -2635,24 +2677,41 @@ export interface WaveEngineFullResult {
    direction: 'LONG' | 'SHORT',
    balance = 1000,
    leverage = 10,
-   predictionMetrics?: WavePredictionMetrics
+   analysis?: Partial<AnalysisResult> | null
  ): CandidateSelectionResult {
    const isLong = direction === 'LONG';
    const notionalUsd = balance * 0.15 * leverage;
    const roundtripFeeUsd = notionalUsd * 0.0011;
    const atrVal = atr || (price * 0.008);
+   const featureVector = getSnapshotFeatureVector(analysis, direction, price);
+   const regime = analysis?.marketRegime ?? 'UNKNOWN';
+   const timeframe = analysis?.timeframe ?? '15m';
+   const candidateMetrics = (setup: string) =>
+     evaluateRealLearnedSegmentMetrics(setup, regime, timeframe, featureVector, direction);
+   const metricsA = candidateMetrics('IMMEDIATE_MARKET');
+   const metricsB = candidateMetrics('PULLBACK_VWAP');
+   const metricsC = candidateMetrics('DEEP_ORDER_BLOCK');
+   const metricsD = candidateMetrics('BREAKOUT_RETEST');
+   const metricsE = candidateMetrics('LIQUIDITY_RECLAIM');
+   const isCandidateEligible = (metrics: ReturnType<typeof candidateMetrics>, probability: number | null) =>
+     metrics.isCalibrationVerified &&
+     probability !== null &&
+     metrics.confidenceInterval !== null &&
+     metrics.confidenceInterval.lowerBound >= 0.55 &&
+     metrics.confidenceInterval.upperBound - metrics.confidenceInterval.lowerBound <= 0.20 &&
+     metrics.expectedCalibrationError !== null &&
+     metrics.expectedCalibrationError <= 0.10 &&
+     metrics.oosSampleSize >= metrics.requiredOosSampleSize &&
+     metrics.expectancyUsd !== null &&
+     metrics.expectancyUsd > 0 &&
+     metrics.fillRate !== null &&
+     metrics.fillRate >= 0.5;
  
-   const metricsA = evaluateRealLearnedSegmentMetrics('IMMEDIATE_MARKET', 'TREND', '15m');
-   const metricsB = evaluateRealLearnedSegmentMetrics('PULLBACK_VWAP', 'TREND', '15m');
-   const metricsC = evaluateRealLearnedSegmentMetrics('DEEP_ORDER_BLOCK', 'TREND', '15m');
-   const metricsD = evaluateRealLearnedSegmentMetrics('BREAKOUT_RETEST', 'TREND', '15m');
-   const metricsE = evaluateRealLearnedSegmentMetrics('LIQUIDITY_RECLAIM', 'TREND', '15m');
- 
-   const probA = metricsA.calibratedWinProbability ?? (predictionMetrics?.continuationProbabilityPct ? predictionMetrics.continuationProbabilityPct / 100 : 0.52);
-   const probB = metricsB.calibratedWinProbability ?? (predictionMetrics?.continuationProbabilityPct ? predictionMetrics.continuationProbabilityPct / 100 : 0.58);
-   const probC = metricsC.calibratedWinProbability ?? (predictionMetrics?.continuationProbabilityPct ? predictionMetrics.continuationProbabilityPct / 100 : 0.61);
-   const probD = metricsD.calibratedWinProbability ?? (predictionMetrics?.continuationProbabilityPct ? predictionMetrics.continuationProbabilityPct / 100 : 0.56);
-   const probE = metricsE.calibratedWinProbability ?? (predictionMetrics?.continuationProbabilityPct ? predictionMetrics.continuationProbabilityPct / 100 : 0.59);
+   const probA = metricsA.calibratedWinProbability;
+   const probB = metricsB.calibratedWinProbability;
+   const probC = metricsC.calibratedWinProbability;
+   const probD = metricsD.calibratedWinProbability;
+   const probE = metricsE.calibratedWinProbability;
  
    // 1. Candidate A: Immediate Market
    const entryA = price;
@@ -2664,9 +2723,6 @@ export interface WaveEngineFullResult {
    const slippageA = notionalUsd * 0.0004;
    const rewardUsdA = notionalUsd * (rewardA / price);
    const riskUsdA = notionalUsd * (riskA / price);
-   const netEdgeA = (probA * rrA) - ((1 - probA) * 1.0) - ((roundtripFeeUsd + slippageA) / (riskUsdA || 1));
-   const evA = Math.round(((probA * rewardUsdA) - ((1 - probA) * riskUsdA) - roundtripFeeUsd - slippageA) * 100) / 100;
- 
    const candidateA: EntryCandidate = {
      id: 'CANDIDATE_A_MARKET',
      nameFa: '۱. ورود آنی مارکت (Market Immediate)',
@@ -2675,14 +2731,25 @@ export interface WaveEngineFullResult {
      takeProfitPrice: tpA,
      expectedMfePct: Number(((rewardA / price) * 100).toFixed(2)),
      expectedMaePct: Number(((riskA / price) * 100).toFixed(2)),
-     tpProbabilityPct: Math.round(probA * 100),
-     slProbabilityPct: Math.round((1 - probA) * 100),
+     tpProbabilityPct: probA === null ? null : Math.round(probA * 100),
+     slProbabilityPct: probA === null ? null : Math.round((1 - probA) * 100),
+     calibratedWinProbability: probA,
+     confidenceInterval: metricsA.confidenceInterval,
+     confidenceIntervalWidth: metricsA.confidenceInterval
+       ? metricsA.confidenceInterval.upperBound - metricsA.confidenceInterval.lowerBound
+       : null,
+     calibrationError: metricsA.expectedCalibrationError,
+     sampleSize: metricsA.resolvedSampleSize,
+     requiredOosSampleSize: metricsA.requiredOosSampleSize,
+     historicalMaePct: metricsA.avgMaePct,
+     historicalMfePct: metricsA.avgMfePct,
+     fillRate: metricsA.fillRate,
      expectedR: Number(rrA.toFixed(2)),
      expectedTimeToTargetMinutes: 35,
      expectedSlippageUsd: Number(slippageA.toFixed(2)),
      expectedFeeUsd: Number(roundtripFeeUsd.toFixed(2)),
-     expectedValueUsd: evA,
-     isQualified: netEdgeA > 0.05 && evA > 0.10
+     expectedValueUsd: metricsA.expectancyUsd,
+     isQualified: isCandidateEligible(metricsA, probA)
    };
  
    // 2. Candidate B: Pullback VWAP
@@ -2695,9 +2762,6 @@ export interface WaveEngineFullResult {
    const slippageB = notionalUsd * 0.0001;
    const rewardUsdB = notionalUsd * (rewardB / entryB);
    const riskUsdB = notionalUsd * (riskB / entryB);
-   const netEdgeB = (probB * rrB) - ((1 - probB) * 1.0) - ((roundtripFeeUsd + slippageB) / (riskUsdB || 1));
-   const evB = Math.round(((probB * rewardUsdB) - ((1 - probB) * riskUsdB) - roundtripFeeUsd - slippageB) * 100) / 100;
- 
    const candidateB: EntryCandidate = {
      id: 'CANDIDATE_B_PULLBACK_VWAP',
      nameFa: '۲. پولبک استاندارد به VWAP/EMA20 (Optimal Pullback)',
@@ -2706,14 +2770,25 @@ export interface WaveEngineFullResult {
      takeProfitPrice: tpB,
      expectedMfePct: Number(((rewardB / entryB) * 100).toFixed(2)),
      expectedMaePct: Number(((riskB / entryB) * 100).toFixed(2)),
-     tpProbabilityPct: Math.round(probB * 100),
-     slProbabilityPct: Math.round((1 - probB) * 100),
+     tpProbabilityPct: probB === null ? null : Math.round(probB * 100),
+     slProbabilityPct: probB === null ? null : Math.round((1 - probB) * 100),
+     calibratedWinProbability: probB,
+     confidenceInterval: metricsB.confidenceInterval,
+     confidenceIntervalWidth: metricsB.confidenceInterval
+       ? metricsB.confidenceInterval.upperBound - metricsB.confidenceInterval.lowerBound
+       : null,
+     calibrationError: metricsB.expectedCalibrationError,
+     sampleSize: metricsB.resolvedSampleSize,
+     requiredOosSampleSize: metricsB.requiredOosSampleSize,
+     historicalMaePct: metricsB.avgMaePct,
+     historicalMfePct: metricsB.avgMfePct,
+     fillRate: metricsB.fillRate,
      expectedR: Number(rrB.toFixed(2)),
      expectedTimeToTargetMinutes: 50,
      expectedSlippageUsd: Number(slippageB.toFixed(2)),
      expectedFeeUsd: Number(roundtripFeeUsd.toFixed(2)),
-     expectedValueUsd: evB,
-     isQualified: netEdgeB > 0.05 && evB > 0.10
+     expectedValueUsd: metricsB.expectancyUsd,
+     isQualified: isCandidateEligible(metricsB, probB)
    };
  
    // 3. Candidate C: Order Block / FVG
@@ -2726,9 +2801,6 @@ export interface WaveEngineFullResult {
    const slippageC = notionalUsd * 0.00005;
    const rewardUsdC = notionalUsd * (rewardC / entryC);
    const riskUsdC = notionalUsd * (riskC / entryC);
-   const netEdgeC = (probC * rrC) - ((1 - probC) * 1.0) - ((roundtripFeeUsd + slippageC) / (riskUsdC || 1));
-   const evC = Math.round(((probC * rewardUsdC) - ((1 - probC) * riskUsdC) - roundtripFeeUsd - slippageC) * 100) / 100;
- 
    const candidateC: EntryCandidate = {
      id: 'CANDIDATE_C_ORDER_BLOCK',
      nameFa: '۳. پولبک عمیق به Order Block / FVG (Deep Pullback)',
@@ -2737,14 +2809,25 @@ export interface WaveEngineFullResult {
      takeProfitPrice: tpC,
      expectedMfePct: Number(((rewardC / entryC) * 100).toFixed(2)),
      expectedMaePct: Number(((riskC / entryC) * 100).toFixed(2)),
-     tpProbabilityPct: Math.round(probC * 100),
-     slProbabilityPct: Math.round((1 - probC) * 100),
+     tpProbabilityPct: probC === null ? null : Math.round(probC * 100),
+     slProbabilityPct: probC === null ? null : Math.round((1 - probC) * 100),
+     calibratedWinProbability: probC,
+     confidenceInterval: metricsC.confidenceInterval,
+     confidenceIntervalWidth: metricsC.confidenceInterval
+       ? metricsC.confidenceInterval.upperBound - metricsC.confidenceInterval.lowerBound
+       : null,
+     calibrationError: metricsC.expectedCalibrationError,
+     sampleSize: metricsC.resolvedSampleSize,
+     requiredOosSampleSize: metricsC.requiredOosSampleSize,
+     historicalMaePct: metricsC.avgMaePct,
+     historicalMfePct: metricsC.avgMfePct,
+     fillRate: metricsC.fillRate,
      expectedR: Number(rrC.toFixed(2)),
      expectedTimeToTargetMinutes: 75,
      expectedSlippageUsd: Number(slippageC.toFixed(2)),
      expectedFeeUsd: Number(roundtripFeeUsd.toFixed(2)),
-     expectedValueUsd: evC,
-     isQualified: netEdgeC > 0.05 && evC > 0.10
+     expectedValueUsd: metricsC.expectancyUsd,
+     isQualified: isCandidateEligible(metricsC, probC)
    };
  
    // 4. Candidate D: Breakout Retest
@@ -2757,9 +2840,6 @@ export interface WaveEngineFullResult {
    const slippageD = notionalUsd * 0.00015;
    const rewardUsdD = notionalUsd * (rewardD / entryD);
    const riskUsdD = notionalUsd * (riskD / entryD);
-   const netEdgeD = (probD * rrD) - ((1 - probD) * 1.0) - ((roundtripFeeUsd + slippageD) / (riskUsdD || 1));
-   const evD = Math.round(((probD * rewardUsdD) - ((1 - probD) * riskUsdD) - roundtripFeeUsd - slippageD) * 100) / 100;
- 
    const candidateD: EntryCandidate = {
      id: 'CANDIDATE_D_BREAKOUT_RETEST',
      nameFa: '۴. ری‌تست سطح شکسته‌شده (Breakout Retest)',
@@ -2768,14 +2848,25 @@ export interface WaveEngineFullResult {
      takeProfitPrice: tpD,
      expectedMfePct: Number(((rewardD / entryD) * 100).toFixed(2)),
      expectedMaePct: Number(((riskD / entryD) * 100).toFixed(2)),
-     tpProbabilityPct: Math.round(probD * 100),
-     slProbabilityPct: Math.round((1 - probD) * 100),
+     tpProbabilityPct: probD === null ? null : Math.round(probD * 100),
+     slProbabilityPct: probD === null ? null : Math.round((1 - probD) * 100),
+     calibratedWinProbability: probD,
+     confidenceInterval: metricsD.confidenceInterval,
+     confidenceIntervalWidth: metricsD.confidenceInterval
+       ? metricsD.confidenceInterval.upperBound - metricsD.confidenceInterval.lowerBound
+       : null,
+     calibrationError: metricsD.expectedCalibrationError,
+     sampleSize: metricsD.resolvedSampleSize,
+     requiredOosSampleSize: metricsD.requiredOosSampleSize,
+     historicalMaePct: metricsD.avgMaePct,
+     historicalMfePct: metricsD.avgMfePct,
+     fillRate: metricsD.fillRate,
      expectedR: Number(rrD.toFixed(2)),
      expectedTimeToTargetMinutes: 40,
      expectedSlippageUsd: Number(slippageD.toFixed(2)),
      expectedFeeUsd: Number(roundtripFeeUsd.toFixed(2)),
-     expectedValueUsd: evD,
-     isQualified: netEdgeD > 0.05 && evD > 0.10
+     expectedValueUsd: metricsD.expectancyUsd,
+     isQualified: isCandidateEligible(metricsD, probD)
    };
  
    // 5. Candidate E: Liquidity Reclaim
@@ -2788,9 +2879,6 @@ export interface WaveEngineFullResult {
    const slippageE = notionalUsd * 0.0001;
    const rewardUsdE = notionalUsd * (rewardE / entryE);
    const riskUsdE = notionalUsd * (riskE / entryE);
-   const netEdgeE = (probE * rrE) - ((1 - probE) * 1.0) - ((roundtripFeeUsd + slippageE) / (riskUsdE || 1));
-   const evE = Math.round(((probE * rewardUsdE) - ((1 - probE) * riskUsdE) - roundtripFeeUsd - slippageE) * 100) / 100;
- 
    const candidateE: EntryCandidate = {
      id: 'CANDIDATE_E_LIQUIDITY_RECLAIM',
      nameFa: '۵. بازپس‌گیری استخر نقدینگی (Liquidity Reclaim)',
@@ -2799,17 +2887,33 @@ export interface WaveEngineFullResult {
      takeProfitPrice: tpE,
      expectedMfePct: Number(((rewardE / entryE) * 100).toFixed(2)),
      expectedMaePct: Number(((riskE / entryE) * 100).toFixed(2)),
-     tpProbabilityPct: Math.round(probE * 100),
-     slProbabilityPct: Math.round((1 - probE) * 100),
+     tpProbabilityPct: probE === null ? null : Math.round(probE * 100),
+     slProbabilityPct: probE === null ? null : Math.round((1 - probE) * 100),
+     calibratedWinProbability: probE,
+     confidenceInterval: metricsE.confidenceInterval,
+     confidenceIntervalWidth: metricsE.confidenceInterval
+       ? metricsE.confidenceInterval.upperBound - metricsE.confidenceInterval.lowerBound
+       : null,
+     calibrationError: metricsE.expectedCalibrationError,
+     sampleSize: metricsE.resolvedSampleSize,
+     requiredOosSampleSize: metricsE.requiredOosSampleSize,
+     historicalMaePct: metricsE.avgMaePct,
+     historicalMfePct: metricsE.avgMfePct,
+     fillRate: metricsE.fillRate,
      expectedR: Number(rrE.toFixed(2)),
      expectedTimeToTargetMinutes: 45,
      expectedSlippageUsd: Number(slippageE.toFixed(2)),
      expectedFeeUsd: Number(roundtripFeeUsd.toFixed(2)),
-     expectedValueUsd: evE,
-     isQualified: netEdgeE > 0.05 && evE > 0.10
+     expectedValueUsd: metricsE.expectancyUsd,
+     isQualified: isCandidateEligible(metricsE, probE)
    };
  
-   const candidates = [candidateA, candidateB, candidateC, candidateD, candidateE];
+   const candidates = [candidateA, candidateB, candidateC, candidateD, candidateE].filter(candidate =>
+     candidate.calibratedWinProbability !== null &&
+     candidate.confidenceInterval !== null &&
+     candidate.fillRate !== null &&
+     candidate.expectedValueUsd !== null
+   );
    const qualifiedCandidates = candidates.filter(c => c.isQualified);
    
    let selectedCandidate: EntryCandidate | null = null;
@@ -2819,7 +2923,9 @@ export interface WaveEngineFullResult {
  
    const selectionReasonFa = selectedCandidate
      ? `کاندید [${selectedCandidate.nameFa}] با بالاترین لبه خالص ریسک‌پذیر (Net Edge | EV: +$${selectedCandidate.expectedValueUsd.toFixed(2)} | R:R ${selectedCandidate.expectedR}R) انتخاب گردید.`
-     : '🛑 هیچ کاندیدای ورودی لبه خالص مثبت معتبر (Net Edge > 0.05) دریافت نکرد.';
+     : candidates.length === 0
+       ? '🛑 هیچ Candidate دارای دیتاست مستقل، احتمال مدل‌محور و OOS معتبر نیست؛ تمام Candidateها مسدود شدند.'
+       : '🛑 هیچ Candidate با Expectancy واقعی مثبت و نرخ اجرای معتبر دریافت نکرد.';
  
    return {
      candidates,
@@ -3008,7 +3114,7 @@ export function runWavePredictionEngine(
   const predictionMetrics = predictWaveMetrics(stageDetails, analysis);
 
   // 3. Candidates Selection by EV
-  const candidateSelection = evaluateEntryCandidates(price, atr, direction, 1000, 10, predictionMetrics);
+  const candidateSelection = evaluateEntryCandidates(price, atr, direction, 1000, 10, analysis);
 
   // 4. Anti-Chasing Filter
   const waveOriginPrice = direction === 'LONG' ? price - (atr * 2.5) : price + (atr * 2.5);
@@ -3025,7 +3131,7 @@ export function runWavePredictionEngine(
     eventTriggerSequence.isAllEventsConfirmed &&
     !!candidateSelection.selectedCandidate;
 
-  let summaryStatusFa = `🌊 موتور پیش‌بینی امواج: مرحله [${stageDetails.stageNameFa}] | امتیاز شتاب: ${predictionMetrics.continuationScore}/100${predictionMetrics.continuationProbabilityPct !== null ? ` | احتمال کالیبره‌شده: ${predictionMetrics.continuationProbabilityPct}٪` : ''}.`;
+  let summaryStatusFa = `🌊 موتور پیش‌بینی امواج: مرحله [${stageDetails.stageNameFa}]${predictionMetrics.continuationScore !== null ? ` | HEURISTIC SCORE: ${predictionMetrics.continuationScore}/100` : ''}${predictionMetrics.continuationProbabilityPct !== null ? ` | احتمال مدل‌محور کالیبره‌شده: ${predictionMetrics.continuationProbabilityPct}٪` : ''}.`;
   if (!stageDetails.isTradeableStage) {
     summaryStatusFa = `🛑 ورود متوقف شد: امواج در مرحله ناایمن [${stageDetails.stageNameFa}] قرار دارند.`;
   } else if (antiChasingGuard.isChasingDetected) {
@@ -3123,7 +3229,3 @@ export function generateEntryQualityCurve(
     maxNetEdge
   };
 }
-
-
-
-

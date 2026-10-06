@@ -1,0 +1,12 @@
+[2026-10-05T20:24:53.134Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-05T20:24:53.830Z] WS_OPEN: Bybit WebSocket linear stream connected.
+[2026-10-05T20:29:28.482Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-05T20:34:48.238Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-05T20:34:48.969Z] WS_OPEN: Bybit WebSocket linear stream connected.
+[2026-10-05T20:38:41.131Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-05T20:38:41.865Z] WS_OPEN: Bybit WebSocket linear stream connected.
+[2026-10-05T22:36:05.563Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-05T22:37:47.750Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-05T22:37:48.458Z] WS_OPEN: Bybit WebSocket linear stream connected.
+[2026-10-06T07:50:00.812Z] WS_CONNECT: Connecting to Bybit WebSocket: wss://stream-testnet.bybit.com/v5/public/linear
+[2026-10-06T07:50:01.530Z] WS_OPEN: Bybit WebSocket linear stream connected.

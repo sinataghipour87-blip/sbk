@@ -48,8 +48,8 @@ export interface EntryCandidate {
   invalidationPrice: number;
   targetPrice: number;
   expectedMovePct: number;
-  spreadBps: number;
-  slippagePct: number;
+  spreadBps: number | null;
+  slippagePct: number | null;
   riskRewardRatio: number;
   probability: number | null;
   expectedValueUsd: number | null;
@@ -571,6 +571,7 @@ export interface DecisionPipelineResult {
   auditTrailDraft?: TradeAuditTrail;
   canonicalDecision?: TradeDecision;
   masterDecision?: MasterDecisionObject;
+  opportunitySurface?: EntryOpportunitySurfaceReport;
   waitReasonFa: string;
   prerequisitesToArmFa: string[];
   evaluatedAtIso: string;
@@ -605,6 +606,7 @@ export interface AnalysisResult {
   stopLossPriceType?: 'MARK_PRICE';
   liquidationPriceType?: 'MARK_PRICE';
   sentiment: SentimentData;
+  htfCandles?: Record<string, Candle[]>;
   action: string;
   actionCol: string;
   direction: 'LONG' | 'SHORT';
@@ -614,6 +616,7 @@ export interface AnalysisResult {
   consensusScore?: number;       // 0 - 100 (Multi-brain & multi-model agreement)
   confidenceScore?: number;      // 0 - 100 (Cognitive heuristic conviction, NOT win probability)
   calibratedWinProbability?: number | null; // 0.00 - 1.00 (Empirical statistical probability or null if uncalibrated)
+  fillProbabilityPct?: number | null;
   scoreLong: number;
   scoreShort: number;
   mtf1m: string;
@@ -753,13 +756,16 @@ export type BrainRoleType =
 
 export interface CalibratedProbabilityMetadata {
   rawEvidenceScore: number;
+  rawProbability: number | null;
   calibratedWinProbability: number | null; // 0.00 - 1.00 or null
   isCalibrationVerified: boolean;
   calibrationVerified: boolean;
   dataSufficient: boolean;
   sampleSize: number;
   resolvedSampleSize: number;
+  requiredOosSampleSize: number;
   oosSampleSize: number;
+  confidenceIntervalWidth: number | null;
   modelVersion: string;
   datasetVersion: string;
   calibrationStatus: 'CALIBRATED' | 'UNCALIBRATED' | 'UNKNOWN';
@@ -956,6 +962,38 @@ export interface EntryOpportunityReport {
   verdictFa: string;
   reasonsFa: string[];
   checkedAt: number;
+}
+
+export type MetaModelHealthState = 'HEALTHY' | 'DEGRADED' | 'SUSPENDED' | 'RETIRED';
+export type HunterMode = 'HUNT' | 'AMBUSH' | 'EXECUTE';
+
+export interface EntryOpportunitySurfacePoint {
+  entryPrice: number;
+  calibratedProbabilityPct: number | null;
+  expectedValueR: number | null;
+  expectedMaeR: number | null;
+  expectedMfeR: number | null;
+  expectedDurationSeconds: number | null;
+  fillProbabilityPct: number | null;
+  slippageBps: number | null;
+  stopDistance: number | null;
+  reward: number | null;
+  liquidityUsd: number | null;
+  qualityScore: number | null;
+}
+
+export interface EntryOpportunitySurfaceReport {
+  mode: HunterMode;
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+  points: EntryOpportunitySurfacePoint[];
+  entryZone: { min: number; max: number } | null;
+  optimalEntryPrice: number | null;
+  isPriceAtOptimalEntry: boolean;
+  isTriggerConfirmed: boolean;
+  readinessPct: number;
+  nearMissReasonFa: string | null;
+  fillProbabilityAvailable: boolean;
+  evaluatedAt: number;
 }
 
 // -------------------------------------------------------------
@@ -1180,6 +1218,16 @@ export interface MarketRegimeClassification {
   suitableStrategy: RegimeStrategyType;
   strategyDescriptionFa: string;
   regimeProbabilities: Record<AdvancedRegimeType, number>;
+  probabilityModelValidation: {
+    status: 'CALIBRATED' | 'UNCALIBRATED';
+    modelVersion: string;
+    horizonCandles: number;
+    trainingSampleSize: number;
+    calibrationSampleSize: number;
+    oosSampleSize: number;
+    oosBrierScore: number | null;
+    baselineBrierScore: number | null;
+  };
   metrics: {
     adx: number;
     atrRatio: number;              // Current ATR / Historical baseline ATR
@@ -1208,19 +1256,21 @@ export interface SetupRegimeEdgeRecord {
   timeframe: TradingTimeframe;
   
   sampleCount: number;
-  winRatePct: number;
-  profitFactor: number;
-  averageR: number;
-  expectancyR: number;            // امید ریاضی در واحد R
+  winRatePct: number | null;
+  profitFactor: number | null;
+  averageR: number | null;
+  expectancyR: number | null;      // امید ریاضی در واحد R
+  validationStatus: 'VALIDATED' | 'UNVALIDATED';
   
   positiveEdgeVerified: boolean;  // آیا Edge آماری مثبت دارد؟
-  activationStatus: 'ACTIVE_APPROVED' | 'BLOCKED_NEGATIVE_EDGE';
+  activationStatus: 'ACTIVE_APPROVED' | 'BLOCKED_NEGATIVE_EDGE' | 'UNVALIDATED';
   reasonFa: string;
 }
 
 export interface RegimeSetupMatrixReport {
   activeRegime: AdvancedRegimeType;
   activeTimeframe: TradingTimeframe;
+  activeDirection: 'LONG' | 'SHORT';
   activeSetupCandidate: EntryCandidateType;
   currentEdgeRecord: SetupRegimeEdgeRecord;
   isSetupAllowedInCurrentRegime: boolean; // گیت اصلی: آیا ستاپ مجاز به اجراست؟
@@ -1361,20 +1411,28 @@ export interface DynamicModelWeightingResult {
 // 92. Meta-Model / Meta-Learner Layer
 // -------------------------------------------------------------
 export interface MetaLearnerInputFeatures {
-  modelPredictions: Record<string, { direction: 'LONG' | 'SHORT' | 'NEUTRAL'; prob: number | null }>;
+  modelPredictions: Record<string, {
+    direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+    prob: number | null;
+    healthState: MetaModelHealthState;
+  }>;
   garchFeature?: { conditionalVolPct: number | null; regime: string; isStationary: boolean };
   bayesianFeature?: { posterior: number | null; bayesFactor: number; isCalibrated: boolean };
-  orderBookFeature?: { obi: number; bidDepthUsd: number; askDepthUsd: number };
+  orderBookFeature?: { obi: number | null; bidDepthUsd: number | null; askDepthUsd: number | null };
   cvdFeature?: { cvdDelta: number | null };
   oiFeature?: { oiValue: number | null; oiChangePct: number | null };
   fundingFeature?: { fundingRate: number | null };
-  momentumFeature?: { rsi: number; adx: number };
+  momentumFeature?: { rsi: number | null; adx: number | null };
   marketRegime: string;
-  spreadBps: number;
-  volatilityPct: number;
+  regimeProbabilities?: Record<AdvancedRegimeType, number>;
+  setupType?: string | null;
+  spreadBps: number | null;
+  volatilityPct: number | null;
   disagreementIndex: number; // 0 - 100%
-  predictionStabilityScore: number; // 0 - 100%
-  latencyMs: number;
+  calibrationErrorPct?: number | null;
+  signalAgeMs?: number | null;
+  predictionStabilityScore?: number; // 0 - 100%
+  latencyMs: number | null;
 }
 
 export interface MetaLearnerPrediction {
@@ -1382,8 +1440,9 @@ export interface MetaLearnerPrediction {
   calibratedProbabilityPct: number | null; // Null if underlying models or sample size fail OOS validation
   expectedReturnR: number | null;
   expectedReturnUsd: number | null;
-  expectedMaeR: number;
-  expectedMfeR: number;
+  expectedMaeR: number | null;
+  expectedMfeR: number | null;
+  expectedDurationSeconds: number | null;
   confidenceInterval: {
     lowerBoundPct: number | null;
     upperBoundPct: number | null;
@@ -1477,13 +1536,5 @@ export interface MasterDecisionObject {
   disagreementReport?: ModelDisagreementReport;
   predictionStability?: PredictionStabilityReport;
   temporalStability?: TemporalEntryStabilityReport;
+  opportunitySurface?: EntryOpportunitySurfaceReport;
 }
-
-
-
-
-
-
-
-
-

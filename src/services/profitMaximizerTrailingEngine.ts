@@ -7,7 +7,7 @@
  * ۲۲. تفکیک دو مفهوم مستقل: Profit Protection و Profit Maximization (جلوگیری از فعال‌سازی زودهنگام Breakeven)
  * ۲۳. ماشین وضعیت موج (Wave State Machine): ۸ فاز کامل از WAVE_FORMING تا EXIT
  * ۲۴. خروج پله‌ای پویا (Adaptive Tier Allocation: TP1 کاهش ریسک، TP2 تثبیت سود، Runner ادامه‌دار با حجم دینامیک)
- * ۲۵. خروج چندبُعدی شواهد‌محور Runner (شکست ساختار، چرخش Order Flow، افت CVD، واگرایی مومنتوم و کاهش احتمال ادامه)
+ * ۲۵. خروج چندبُعدی شواهد‌محور Runner با امتیاز ساختاری/جریان سفارش (نه احتمال آماری)
  * =============================================================================
  */
 
@@ -32,7 +32,7 @@ export interface MultiDimensionalExitSignals {
   isMomentumFailed: boolean;
   isLiquidityTargetReached: boolean;
   isVolatilityExhausted: boolean;
-  isContinuationProbCollapsed: boolean;
+  isContinuationScoreLow: boolean;
   compositeExitUrgencyScore: number; // 0 - 100
   shouldExitRunnerImmediately: boolean;
   exitReasonFa: string;
@@ -57,7 +57,7 @@ export interface PositionProfitState {
   lockedProfitUsd: number;
   capitalProtectionTriggered: boolean;
   exchangeFeeCovered: boolean;
-  continuationProbabilityPct: number;
+  continuationHeuristicScore: number;
   isBreakevenPermitted: boolean;
   profitProtection: {
     isBreakevenArmed: boolean;
@@ -99,7 +99,7 @@ export class ProfitMaximizerTrailingEngine {
     macdHistDelta: number;
     obi: number;
     cvdDelta: number;
-  }): { state: WaveStateMachineState; continuationProbPct: number; rationaleFa: string } {
+  }): { state: WaveStateMachineState; continuationHeuristicScore: number; rationaleFa: string } {
     const {
       direction,
       priceDeltaPct,
@@ -120,7 +120,7 @@ export class ProfitMaximizerTrailingEngine {
     if (priceDeltaPct <= -1.8) {
       return {
         state: 'EXIT',
-        continuationProbPct: 15,
+        continuationHeuristicScore: 15,
         rationaleFa: 'خروج فوری: نقض کامل شرایط موج و فعال‌سازی حد ابطال ساختاری.'
       };
     }
@@ -129,7 +129,7 @@ export class ProfitMaximizerTrailingEngine {
     if (mfePct >= 3.5 && ((isLong && curRsi > 78 && macdHistDelta < 0) || (!isLong && curRsi < 22 && macdHistDelta > 0))) {
       return {
         state: 'DISTRIBUTION',
-        continuationProbPct: 28,
+        continuationHeuristicScore: 28,
         rationaleFa: 'فاز توزیع نهنگ‌ها: اشباع شدید قیمت همراه با واگرایی نزولی و کاهش شتاب حجم.'
       };
     }
@@ -138,7 +138,7 @@ export class ProfitMaximizerTrailingEngine {
     if (mfePct >= 2.5 && ((isLong && curRsi > 72 && !isObiSupportive) || (!isLong && curRsi < 28 && !isObiSupportive))) {
       return {
         state: 'EXHAUSTION_WARNING',
-        continuationProbPct: 42,
+        continuationHeuristicScore: 42,
         rationaleFa: 'هشدار خستگی موج: واگرایی سفارشات دفتر سفارش و افت مومنتوم نسبت به سقف/کف قبلی.'
       };
     }
@@ -147,7 +147,7 @@ export class ProfitMaximizerTrailingEngine {
     if (priceDeltaPct >= 2.2 && mfePct >= 2.2) {
       return {
         state: 'MATURE_WAVE',
-        continuationProbPct: 58,
+        continuationHeuristicScore: 58,
         rationaleFa: 'موج بالغ و پیشرفته: بخش عمده تارگت محقق شده؛ فعال‌سازی مدیریت تریلینگ روی Runner.'
       };
     }
@@ -156,7 +156,7 @@ export class ProfitMaximizerTrailingEngine {
     if (priceDeltaPct >= 1.2 && isObiSupportive && isCvdSupportive) {
       return {
         state: 'TREND_EXPANSION',
-        continuationProbPct: 74,
+        continuationHeuristicScore: 74,
         rationaleFa: 'انبساط روند (Trend Expansion): قدرت بالای جریان سفارشات و مومنتوم شتاب‌گیرنده در جهت پوزیشن.'
       };
     }
@@ -165,7 +165,7 @@ export class ProfitMaximizerTrailingEngine {
     if (priceDeltaPct >= 0.55 && isObiSupportive) {
       return {
         state: 'EARLY_ACCELERATION',
-        continuationProbPct: 68,
+        continuationHeuristicScore: 68,
         rationaleFa: 'شتاب اولیه: خروج از محدوده تراکم و حرکت هماهنگ با اردر بوک به سمت تارگت ۱.'
       };
     }
@@ -174,7 +174,7 @@ export class ProfitMaximizerTrailingEngine {
     if (priceDeltaPct >= 0.20) {
       return {
         state: 'WAVE_CONFIRMED',
-        continuationProbPct: 60,
+        continuationHeuristicScore: 60,
         rationaleFa: 'تایید اولیه موج: ورود موفق و آغاز واکنش مثبت بدون شکست ساختار کف/سقف حمایتی.'
       };
     }
@@ -182,7 +182,7 @@ export class ProfitMaximizerTrailingEngine {
     // ۸. فاز شکل‌گیری موج (WAVE_FORMING)
     return {
       state: 'WAVE_FORMING',
-      continuationProbPct: 52,
+      continuationHeuristicScore: 52,
       rationaleFa: 'در حال شکل‌گیری موج اولیه: حفظ فضای تنفس استاندارد برای نوسانات طبیعی پولبک.'
     };
   }
@@ -319,7 +319,7 @@ export class ProfitMaximizerTrailingEngine {
       }
     }
 
-    // ۲۴ و ۲۵. خروج چندبعدی ۵۰٪ دوم (Runner) - حفظ پوزیشن تا زمان بقای شواهد آماری موج (احتمال ادامه >= ۵۰٪)
+    // ۲۴ و ۲۵. خروج چندبعدی ۵۰٪ دوم (Runner) - حفظ پوزیشن بر اساس امتیاز ساختاری موج
     const isStructureBroken = isLong ? current < (entry - curAtr * 1.8) : current > (entry + curAtr * 1.8);
     const isOrderFlowReversed = isLong ? obi < -0.35 : obi > 0.35;
     const isCvdDeteriorated = isLong ? cvdDelta < -120 : cvdDelta > 120;
@@ -327,20 +327,20 @@ export class ProfitMaximizerTrailingEngine {
     const isMomentumFailed = (isLong && curRsi < 35) || (!isLong && curRsi > 65);
     const isLiquidityTargetReached = mfePct >= 5.0;
     const isVolatilityExhausted = waveInfo.state === 'DISTRIBUTION';
-    const isContinuationProbCollapsed = waveInfo.continuationProbPct < 40;
+    const isContinuationScoreLow = waveInfo.continuationHeuristicScore < 40;
 
     let exitUrgencyScore = 0;
     if (isStructureBroken) exitUrgencyScore += 50;
     if (isOrderFlowReversed) exitUrgencyScore += 30;
     if (isCvdDeteriorated) exitUrgencyScore += 20;
-    if (isContinuationProbCollapsed) exitUrgencyScore += 25;
+    if (isContinuationScoreLow) exitUrgencyScore += 25;
     exitUrgencyScore = Math.min(100, exitUrgencyScore);
 
     // خروج Runner صرفاً در صورت نمره urgency بالای ۷۵ یا شکست قطعی ساختار
     const shouldExitRunnerImmediately = exitUrgencyScore >= 75 || isStructureBroken;
     const exitReasonFa = shouldExitRunnerImmediately
       ? `خروج Runner: ${isStructureBroken ? 'شکست ساختار روند ۵ دقیقه‌ای' : ''} ${isOrderFlowReversed ? 'چرخش شدید جریان سفارشات' : ''}`
-      : `شواهد موج معتبر است (احتمال ادامه: ${waveInfo.continuationProbPct}٪)؛ بخش Runner توسط تریلینگ پویای ${breathingRoomAtr} ATR نگهداری می‌شود.`;
+      : `امتیاز HEURISTIC SCORE موج ${waveInfo.continuationHeuristicScore}/100 است؛ بخش Runner توسط تریلینگ پویای ${breathingRoomAtr} ATR مدیریت می‌شود.`;
 
     const runnerTargetExtPrice = isLong ? entry + (curAtr * 4.5) : entry - (curAtr * 4.5);
 
@@ -356,7 +356,7 @@ export class ProfitMaximizerTrailingEngine {
       lockedProfitUsd,
       capitalProtectionTriggered,
       exchangeFeeCovered: true,
-      continuationProbabilityPct: waveInfo.continuationProbPct,
+      continuationHeuristicScore: waveInfo.continuationHeuristicScore,
       isBreakevenPermitted,
       profitProtection: {
         isBreakevenArmed: isBreakevenPermitted,
@@ -367,11 +367,11 @@ export class ProfitMaximizerTrailingEngine {
           : `حفاظت سرمایه در فاز تنفس (${mfeRMultiple.toFixed(2)}R): استاپ به بریک‌اون منتقل نشده تا معامله از نویزهای اولیه خارج نشود (نیازمند حداقل 1.0R).`,
       },
       profitMaximization: {
-        isRunnerActive: waveInfo.state !== 'WAVE_FORMING' && waveInfo.state !== 'EXIT' && waveInfo.continuationProbPct >= 40,
+        isRunnerActive: waveInfo.state !== 'WAVE_FORMING' && waveInfo.state !== 'EXIT' && waveInfo.continuationHeuristicScore >= 40,
         tierAllocations,
         breathingRoomAtr,
         runnerTargetExtPrice: Math.round(runnerTargetExtPrice * 100) / 100,
-        maximizationRationaleFa: `ماشین وضعیت: ${waveInfo.state} | احتمال ادامه: ${waveInfo.continuationProbPct}٪ | فاصله تریلینگ پویا: ${breathingRoomAtr} ATR`,
+        maximizationRationaleFa: `ماشین وضعیت: ${waveInfo.state} | HEURISTIC SCORE: ${waveInfo.continuationHeuristicScore}/100 | فاصله تریلینگ پویا: ${breathingRoomAtr} ATR`,
       },
       exitSignals: {
         isStructureBroken,
@@ -381,17 +381,16 @@ export class ProfitMaximizerTrailingEngine {
         isMomentumFailed,
         isLiquidityTargetReached,
         isVolatilityExhausted,
-        isContinuationProbCollapsed,
+        isContinuationScoreLow,
         compositeExitUrgencyScore: exitUrgencyScore,
         shouldExitRunnerImmediately,
         exitReasonFa,
       },
       actionGuidanceFa: shouldExitRunnerImmediately
         ? `🚨 ${exitReasonFa}`
-        : `🌊 فاز موج: ${waveInfo.state} (${waveInfo.continuationProbPct}٪ ادامه) • تریلینگ پویا ${breathingRoomAtr}x ATR (${currentTrailingOffsetPct.toFixed(2)}٪) • ${tierAllocations.descriptionFa}`
+        : `🌊 فاز موج: ${waveInfo.state} (HEURISTIC SCORE: ${waveInfo.continuationHeuristicScore}/100) • تریلینگ پویا ${breathingRoomAtr}x ATR (${currentTrailingOffsetPct.toFixed(2)}٪) • ${tierAllocations.descriptionFa}`,
     };
   }
 }
 
 export const profitMaximizerTrailingEngine = ProfitMaximizerTrailingEngine.getInstance();
-

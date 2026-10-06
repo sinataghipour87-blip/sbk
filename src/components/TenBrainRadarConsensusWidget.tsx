@@ -144,7 +144,7 @@ export const TenBrainRadarConsensusWidget: React.FC<Props> = ({
                   <span>برآیند همگرایی ۱۱ مغز برای جهت معامله: <span className={report.masterDirection === 'LONG' ? 'text-emerald-400' : 'text-rose-400'}>[{report.masterDirection}]</span></span>
                 </h4>
                 <p className="text-[11px] text-slate-400 font-mono mt-0.5">
-                  امتیاز همگرایی کلان: {report.consensusScorePct}٪ | احتمال برد تخمینی: {report.winProbabilityPct}٪
+                  امتیاز همگرایی کلان: {report.consensusScorePct}٪ | احتمال برد تخمینی: {report.winProbabilityPct !== null ? `${report.winProbabilityPct}٪` : 'نامشخص'}
                 </p>
               </div>
               <span className="px-3 py-1 rounded-xl bg-cyan-950/85 text-cyan-300 border border-cyan-500/40 text-xs font-bold">

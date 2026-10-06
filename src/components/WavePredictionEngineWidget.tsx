@@ -33,7 +33,7 @@ export const WavePredictionEngineWidget: React.FC<Props> = ({ analysis, predicti
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-400 font-sans">اطمینان مرحله:</span>
             <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 font-bold border border-cyan-800">
-              {stageDetails.stageConfidencePct}٪
+              {stageDetails.stageConfidencePct !== null ? `${stageDetails.stageConfidencePct}٪` : 'UNVALIDATED'}
             </span>
           </div>
         </div>
@@ -50,7 +50,7 @@ export const WavePredictionEngineWidget: React.FC<Props> = ({ analysis, predicti
             <div className="bg-[#040e21] p-2.5 rounded-lg border border-slate-800">
               <span className="text-[10px] text-slate-400 font-sans block mb-0.5">A) امتیاز شتاب ادامه (Score):</span>
               <span className="text-sm font-black text-cyan-300">
-                {predictionMetrics.continuationScore}/100
+                {predictionMetrics.continuationScore !== null ? `${predictionMetrics.continuationScore}/100` : 'UNVALIDATED'}
               </span>
               <span className="text-[9px] text-slate-400 font-sans block mt-1">
                 احتمال کالیبره‌شده: {predictionMetrics.continuationProbabilityPct !== null ? `${predictionMetrics.continuationProbabilityPct}٪` : 'UNVALIDATED'}
@@ -204,8 +204,32 @@ export const WavePredictionEngineWidget: React.FC<Props> = ({ analysis, predicti
                       <span className="text-slate-400">احتمال رسیدن به TP:</span>
                       <strong className="text-cyan-300">{cand.tpProbabilityPct}٪</strong>
                     </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">بازه اطمینان ۹۵٪:</span>
+                      <strong className="text-indigo-300">
+                        {cand.confidenceInterval
+                          ? `${(cand.confidenceInterval.lowerBound * 100).toFixed(1)}–${(cand.confidenceInterval.upperBound * 100).toFixed(1)}٪`
+                          : 'UNVALIDATED'}
+                      </strong>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">خطای کالیبراسیون / OOS:</span>
+                      <strong className="text-indigo-300">
+                        {cand.calibrationError !== null
+                          ? `${(cand.calibrationError * 100).toFixed(1)}٪ | ${cand.sampleSize}/${cand.requiredOosSampleSize}`
+                          : 'UNVALIDATED'}
+                      </strong>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">Fill / MAE / MFE تاریخی:</span>
+                      <strong className="text-indigo-300">
+                        {cand.fillRate !== null
+                          ? `${(cand.fillRate * 100).toFixed(1)}٪ | ${cand.historicalMaePct ?? 'N/A'} | ${cand.historicalMfePct ?? 'N/A'}`
+                          : 'UNVALIDATED'}
+                      </strong>
+                    </div>
                     <div className="flex justify-between border-t border-slate-800/80 pt-1">
-                      <span className="text-slate-400 font-sans font-bold">امید ریاضی (EV):</span>
+                      <span className="text-slate-400 font-sans font-bold">Expectancy واقعی Dataset:</span>
                       <strong className={`font-black ${cand.expectedValueUsd > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {cand.expectedValueUsd > 0 ? '+' : ''}${cand.expectedValueUsd.toFixed(2)}
                       </strong>

@@ -1,14 +1,12 @@
 /**
- * 🚪 Independent Exit Decision Engine & Remaining Expected Value (EV_remaining)
- * Items 74, 75, 76, 77
- * 
- * - Item 74: Dynamic Wave Runner Management based on Continuation Probability, MFE, Structure, Order Flow, Volatility.
+ * 🚪 Structural Exit Decision Engine
+ * Items 74, 75
+ *
+ * - Item 74: Dynamic Wave Runner Management based on structural score, MFE, Order Flow, and Volatility.
  * - Item 75: Event-Based Dynamic Exits (Structure Break, Liquidity Reversal, CVD Collapse, OBI Flip, Volatility Shock, Momentum Failure).
- * - Item 76: Independent Exit Model (separate from Entry Model).
- * - Item 77: Remaining Expected Value (EV_remaining) Calculation.
  */
 
-import { Candle, TradePosition, AnalysisResult, OrderFlowFeatures } from '../types/trading';
+import { Candle, TradePosition, AnalysisResult } from '../types/trading';
 
 export type ExitEventTriggerType =
   | 'NONE'
@@ -30,12 +28,12 @@ export interface ExitEvaluationResult {
   currentPnlPct: number;
   currentPnlUsd: number;
 
-  continuationProbabilityPct: number; // 0 - 100%
-  reversalProbabilityPct: number; // 0 - 100%
-  expectedRemainingValueR: number; // EV_remaining in R
-  expectedRemainingValueUsd: number;
-  historicalMedianMfeR: number;
-  mfeRealizationRatio: number;
+  continuationHeuristicScore: number; // 0 - 100; structural score, not a probability
+  reversalHeuristicScore: number;
+  expectedRemainingValueR: number | null;
+  expectedRemainingValueUsd: number | null;
+  historicalMedianMfeR: number | null;
+  mfeRealizationRatio: number | null;
   currentMfeR: number;
   currentMaeR: number;
   structureHealthScore: number; // 0 - 100
@@ -140,22 +138,12 @@ export class ExitDecisionEngine {
 
     structureHealthScore = Math.max(5, Math.min(99, structureHealthScore));
 
-    // Continuation & Reversal Probabilities
-    let continuationScore = structureHealthScore;
-    const continuationProbabilityPct = Math.max(5, Math.min(95, continuationScore));
-    const reversalProbabilityPct = 100 - continuationProbabilityPct;
-
-    // Remaining EV Calculation
-    const historicalMedianMfeR = 3.5;
-    const remainingMfePotentialR = Math.max(0, historicalMedianMfeR - Math.max(0, currentProfitR));
-    const mfeRealizationRatio = Math.round((Math.max(0, currentProfitR) / historicalMedianMfeR) * 100) / 100;
-
-    const riskToStopR = 0.6;
-    const pCont = continuationProbabilityPct / 100;
-    const pRev = reversalProbabilityPct / 100;
-    const rawEvRemaining = (pCont * remainingMfePotentialR) - (pRev * riskToStopR) - 0.04;
-    const expectedRemainingValueR = Math.round(rawEvRemaining * 100) / 100;
-    const expectedRemainingValueUsd = Math.round((expectedRemainingValueR * riskDist * (notional / entry)) * 100) / 100;
+    const continuationHeuristicScore = structureHealthScore;
+    const reversalHeuristicScore = 100 - continuationHeuristicScore;
+    const expectedRemainingValueR = null;
+    const expectedRemainingValueUsd = null;
+    const historicalMedianMfeR = null;
+    const mfeRealizationRatio = null;
 
     // 27. Breakeven Intelligence (Entry + Fees + Expected Slippage + Safety Buffer)
     const entryFeePerBtc = entry * 0.00055;
@@ -168,34 +156,34 @@ export class ExitDecisionEngine {
       ? Math.round((entry + frictionBufferPrice) * 100) / 100
       : Math.round((entry - frictionBufferPrice) * 100) / 100;
     
-    // Breakeven is eligible only when profit exceeds friction buffer and continuation probability supports holding
-    const isBreakevenEligible = currentProfitR >= 0.8 && continuationProbabilityPct >= 55;
+    // Breakeven is eligible only when profit exceeds friction buffer and structural score supports holding.
+    const isBreakevenEligible = currentProfitR >= 0.8 && continuationHeuristicScore >= 55;
 
     // 26. Runner Intelligence (Wave Surfing)
     let runnerIntelligenceStatus: ExitEvaluationResult['runnerIntelligenceStatus'] = 'KEEP_RUNNER';
     if (currentProfitR >= 1.5) {
-      if (continuationProbabilityPct < 55 || triggeredEvents.length > 0 || expectedRemainingValueR < 0.20) {
+      if (continuationHeuristicScore < 55 || triggeredEvents.length > 0) {
         runnerIntelligenceStatus = 'CLOSE_RUNNER';
-      } else if (continuationProbabilityPct < 70) {
+      } else if (continuationHeuristicScore < 70) {
         runnerIntelligenceStatus = 'REDUCE_RUNNER';
       }
     }
 
     // 28. Smart Loser Exit Intelligence
-    const isThesisValid = structureHealthScore >= 40 && continuationProbabilityPct >= 35 && expectedRemainingValueR >= -0.2;
+    const isThesisValid = structureHealthScore >= 40 && continuationHeuristicScore >= 35;
     const earlyExitRecommended = !isThesisValid && currentProfitR < 0;
     const loserThesisStatus = {
       isThesisValid,
       earlyExitRecommended,
       rationaleFa: isThesisValid
         ? 'تز معامله هنوز معتبر است و ساختار بازار از پوزیشن پشتیبانی می‌کند.'
-        : `🛑 نقض تز معامله (Thesis Invalidated): سلامت ساختار افت کرده و احتمال برگشت زیاد است. خروج زودهنگام با ضرر کمتر توصیه می‌شود.`
+        : `🛑 نقض تز معامله (Thesis Invalidated): امتیاز ساختاری افت کرده است. خروج زودهنگام با زیان کمتر توصیه می‌شود.`
     };
 
     // 25. Independent Exit Brain Action Decision (HOLD / REDUCE / TRAIL / EXIT)
     let action: ExitEvaluationResult['action'] = 'HOLD';
     let primaryExitTrigger: ExitEventTriggerType = triggeredEvents.length > 0 ? triggeredEvents[0] : 'NONE';
-    let exitUrgencyScore = Math.min(100, Math.max(0, 100 - continuationProbabilityPct));
+    let exitUrgencyScore = Math.min(100, Math.max(0, 100 - continuationHeuristicScore));
 
     let recommendedTrailingStopPrice = isLong
       ? Math.round((currentPrice - 0.7 * atr) * 100) / 100
@@ -209,7 +197,7 @@ export class ExitDecisionEngine {
       exitUrgencyScore = 95;
       rationaleFa = `خروج هوشمند معامله بازنده: تز اولیه معامله شکست خورده و ماندن در پوزیشن ریسک ضرر بیشتر را ایجاد می‌کند.`;
       guidanceFa = 'قبل از برخورد به استاپ لاس سخت، پوزیشن را با زیان کمتر ببندید.';
-    } else if (runnerIntelligenceStatus === 'CLOSE_RUNNER' || expectedRemainingValueR <= 0.10 && currentProfitR >= 1.5) {
+    } else if (runnerIntelligenceStatus === 'CLOSE_RUNNER' && currentProfitR >= 1.5) {
       action = 'EXIT';
       exitUrgencyScore = 88;
       rationaleFa = `خروج کامل موج رانر: سود عالی (+${currentProfitR}R) محقق شده و راندمان باقیمانده به حداقل رسیده است.`;
@@ -219,10 +207,10 @@ export class ExitDecisionEngine {
       exitUrgencyScore = 65;
       rationaleFa = `کاهش حجم رانر (REDUCE): نشانه‌های اولیه ضعف در CVD یا اردر‌بوک پدیدار شده است.`;
       guidanceFa = '۵۰٪ از حجم رانر را ببندید و بقیه را با تریلینگ هدایت کنید.';
-    } else if (continuationProbabilityPct >= 68 && expectedRemainingValueR >= 0.5) {
+    } else if (continuationHeuristicScore >= 68) {
       action = 'HOLD';
       exitUrgencyScore = 20;
-      rationaleFa = `نگهداری پایدار (HOLD): سلامت ساختار بازار (${structureHealthScore}/100) و احتمال ادامه روند (${continuationProbabilityPct}٪) عالی است.`;
+      rationaleFa = `نگهداری بر پایه ساختار (HOLD): امتیاز HEURISTIC SCORE برابر ${continuationHeuristicScore}/100 است.`;
       guidanceFa = 'در معامله بمانید و اجازه دهید موج قیمت رشد کند.';
     } else {
       action = 'TRAIL';
@@ -242,8 +230,8 @@ export class ExitDecisionEngine {
       currentProfitR,
       currentPnlPct,
       currentPnlUsd,
-      continuationProbabilityPct,
-      reversalProbabilityPct,
+      continuationHeuristicScore,
+      reversalHeuristicScore,
       expectedRemainingValueR,
       expectedRemainingValueUsd,
       historicalMedianMfeR,
