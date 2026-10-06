@@ -251,10 +251,29 @@ export const DecisionPipelineWidget: React.FC<DecisionPipelineWidgetProps> = ({
                   <p className="my-2 text-[10px] text-amber-300">
                     {pipeline.opportunitySurface.nearMissReasonFa ?? 'Trigger و شرایط اجرا تایید شدند.'}
                   </p>
+                  {pipeline.opportunitySurface.triggerQuality && (
+                    <div className="mb-2 text-[9px] text-slate-300">
+                      Trigger Quality (امتیاز، نه احتمال): {pipeline.opportunitySurface.triggerQuality.qualityScore === null
+                        ? '—'
+                        : `${pipeline.opportunitySurface.triggerQuality.qualityScore}/100`}
+                      {' · '}Event: {pipeline.opportunitySurface.triggerQuality.eventStrength}/100
+                      {' · '}Volume: {pipeline.opportunitySurface.triggerQuality.volumeStrength === null
+                        ? '—'
+                        : `${pipeline.opportunitySurface.triggerQuality.volumeStrength}/100`}
+                      {' · '}Reclaim: {pipeline.opportunitySurface.triggerQuality.reclaimStrength}/100
+                      {' · '}Order Flow: {pipeline.opportunitySurface.triggerQuality.orderFlowConfirmation === null
+                        ? '—'
+                        : `${pipeline.opportunitySurface.triggerQuality.orderFlowConfirmation}/100`}
+                      {' · '}Failure-to-Continue: {pipeline.opportunitySurface.triggerQuality.failureToContinueStrength === null
+                        ? '—'
+                        : `${pipeline.opportunitySurface.triggerQuality.failureToContinueStrength}/100`}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-1">
                     {pipeline.opportunitySurface.points.map((point, index) => (
                       <div key={`${point.entryPrice}-${index}`} className="rounded border border-slate-800 p-1.5 text-[9px] text-slate-300">
                         <div className="font-bold text-cyan-300">${point.entryPrice.toFixed(2)}</div>
+                        <div>Quality Score: {point.qualityScore === null ? '—' : `${point.qualityScore}/100`}</div>
                         <div>EV: {point.expectedValueR === null ? '—' : `${point.expectedValueR.toFixed(3)}R`}</div>
                         <div>Meta P (مشترک نقاط): {point.calibratedProbabilityPct === null ? '—' : `${point.calibratedProbabilityPct.toFixed(1)}٪`}</div>
                         <div>Fill: {point.fillProbabilityPct === null ? '—' : `${point.fillProbabilityPct.toFixed(1)}٪`}</div>

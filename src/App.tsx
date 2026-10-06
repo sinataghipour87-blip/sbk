@@ -79,6 +79,7 @@ import {
   fetchHtf, 
   fetchOrderBookImbalance, 
   fetchRealOrderBookImbalance, 
+  fetchRealTradeFlowCvd,
   fetchFuturesPrices,
   evaluateMarketDataQuality, 
   getCanonicalMarketSnapshot 
@@ -1338,11 +1339,12 @@ export default function App() {
         // fallback to default
       }
 
-      const [candleData, fng, deriv, realObiData, htf, futuresPrices, canonicalSnapshot] = await Promise.all([
+      const [candleData, fng, deriv, realObiData, orderFlowFeatures, htf, futuresPrices, canonicalSnapshot] = await Promise.all([
         fetchCandles(),
         fetchFearGreed(),
         fetchDerivatives(),
         fetchRealOrderBookImbalance(),
+        fetchRealTradeFlowCvd(),
         fetchHtf(),
         fetchFuturesPrices(),
         getCanonicalMarketSnapshot().catch(() => undefined),
@@ -1369,7 +1371,8 @@ export default function App() {
         dataQualityReport,
         realObiData,
         canonicalSnapshot,
-        futuresPrices
+        futuresPrices,
+        orderFlowFeatures
       );
 
       const effectiveUserLev = userLeverageRef.current;

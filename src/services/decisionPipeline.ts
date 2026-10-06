@@ -832,6 +832,7 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     isTriggerConfirmed: stage8Passed && temporalStability.isStructuralTriggerConfirmed,
     isModelEnsembleHealthy: hasHealthyMultiBrainEnsemble,
     fillProbabilityPct: analysis?.fillProbabilityPct ?? null,
+    triggerQuality: analysis?.setupContext?.triggerQuality ?? null,
   });
   if (!hasHealthyMultiBrainEnsemble) {
     const blocker = !hasCurrentMultiBrainReport

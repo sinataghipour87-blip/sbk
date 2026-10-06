@@ -22,6 +22,5 @@
 ## 5. Production Readiness & Environment Isolation
 - All generated code must be syntactically valid, type-safe, and immediately runnable.
 - Strict environment separation: NEVER import Node.js server-only modules (e.g., `crypto`, `fs`) into client/browser bundles.
-- Do NOT perform full workspace searches, multi-file scans, or read unrelated files.
-- If target file is unknown, only return 2-3 suspected paths without reading their contents.
-- Always apply surgical edits to the specific file requested with minimal context expansion.
+
+“Please automatically search the repository for the most relevant files related to the signal scanning and generation module, and proceed with the implementation directly within those files.”

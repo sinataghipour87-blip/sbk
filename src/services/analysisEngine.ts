@@ -204,7 +204,8 @@ export function analyzePro(
   dataQualityReport?: DataQualityReport,
   realObiData?: RealOrderBookImbalance,
   canonicalSnapshot?: CanonicalMarketSnapshot,
-  futuresPrices?: FuturesPrices
+  futuresPrices?: FuturesPrices,
+  orderFlowFeatures?: OrderFlowFeatures
 ): AnalysisResult {
   // Strict Safety Guard (Item 35): If real candles are unavailable, stale, or data quality report disallows trade -> Strictly disable trading!
   if (!candles || candles.length < 300 || dataStatus === 'DATA_UNAVAILABLE' || dataStatus === 'STALE' || (dataQualityReport && !dataQualityReport.isTradeAllowed)) {
@@ -501,19 +502,45 @@ export function analyzePro(
   }
 
   // 1. Dynamic Swing Structure & Liquidity Sweep Detection
-  let swingLow = price;
-  let swingHigh = price;
-  if (candles.length >= 15) {
-    const recentCandles = candles.slice(-20);
-    swingLow = Math.min(...recentCandles.map(c => c[2]));
-    swingHigh = Math.max(...recentCandles.map(c => c[1]));
-  }
-
-  // Detect Liquidity Sweep: Did a recent candle wick sweep below swingLow / above swingHigh and close back inside?
-  const recent5 = candles.slice(-5);
-  const isLiquiditySweep = confDirection === 'LONG'
-    ? recent5.some(c => c[2] <= swingLow && c[3] > swingLow)
-    : recent5.some(c => c[1] >= swingHigh && c[3] < swingHigh);
+  const priorCandles = candles.slice(-21, -1);
+  const swingLow = priorCandles.length > 0
+    ? Math.min(...priorCandles.map(c => c[2]))
+    : price;
+  const swingHigh = priorCandles.length > 0
+    ? Math.max(...priorCandles.map(c => c[1]))
+    : price;
+  const currentCandleVolume = lastCandle[4];
+  const priorVolumes = priorCandles
+    .map(c => c[4])
+    .filter(volume => Number.isFinite(volume) && volume > 0);
+  const averagePriorVolume = priorVolumes.length > 0
+    ? priorVolumes.reduce((total, volume) => total + volume, 0) / priorVolumes.length
+    : null;
+  const volumeStrength = Number.isFinite(currentCandleVolume) &&
+    currentCandleVolume > 0 && averagePriorVolume !== null
+    ? Math.max(0, Math.min(100, (currentCandleVolume / averagePriorVolume) * 50))
+    : null;
+  const isLiquiditySweep = priorCandles.length >= 10 && (confDirection === 'LONG'
+    ? lastCandle[2] < swingLow && lastCandle[3] > swingLow
+    : lastCandle[1] > swingHigh && lastCandle[3] < swingHigh);
+  const directionalBodyStrength = currAtr > 0 &&
+    (confDirection === 'LONG'
+      ? lastCandle[3] > lastCandle[0]
+      : lastCandle[3] < lastCandle[0])
+    ? Math.max(0, Math.min(100, (Math.abs(lastCandle[3] - lastCandle[0]) / currAtr) * 100))
+    : 0;
+  const sweepPenetration = confDirection === 'LONG'
+    ? Math.max(0, swingLow - lastCandle[2])
+    : Math.max(0, lastCandle[1] - swingHigh);
+  const eventStrength = isLiquiditySweep && currAtr > 0
+    ? Math.max(0, Math.min(100, (sweepPenetration / currAtr) * 100))
+    : directionalBodyStrength;
+  const reclaimDistance = confDirection === 'LONG'
+    ? Math.max(0, lastCandle[3] - swingLow)
+    : Math.max(0, swingHigh - lastCandle[3]);
+  const reclaimStrength = isLiquiditySweep && currAtr > 0
+    ? Math.max(0, Math.min(100, (reclaimDistance / currAtr) * 100))
+    : 0;
 
   // 2. Discover Optimal Entry Zone & Structural Invalidation Level (Issue 6 & 8)
   let setupType: SetupContext['setupType'] = 'VWAP_MSS_CONTINUATION';
@@ -563,7 +590,7 @@ export function analyzePro(
 
   // 3. Market-Aware Structural Invalidation Stop Loss (Issue 8 & 37 & 38)
   // Stop is anchored to structural invalidation with historical MAE Fingerprint cross-validation
-  const provOrderFlow = calculateOrderFlowFeatures(candles);
+  const provOrderFlow = orderFlowFeatures ?? calculateOrderFlowFeatures(candles);
   const provRegime = classifyMarketRegime(candles, price, adxVal, currAtr, bbUp, bbLow, bbMid, vwapVal, provOrderFlow);
   const currentFingerprint = getMaeMfeFingerprint(setupType, provRegime.activeRegime, '15m');
   const slReport = separateStopFromProbability(confDirection, price, invalidationLevel, currentFingerprint, currAtr);
@@ -589,7 +616,6 @@ export function analyzePro(
 
   // 5. Entry State Machine: SETUP_IDENTIFIED -> ARMED -> TRIGGERED (Issues 11, 12, 13, 14, 15)
   let lifecycleState: SignalLifecycleState = 'SETUP_IDENTIFIED';
-  let isTriggerConfirmed = false;
   const triggerCandlePrice = confDirection === 'LONG'
     ? Math.round((Math.max(lastCandle[1], prevCandle[1]) + (currAtr * 0.05)) * 100) / 100
     : Math.round((Math.min(lastCandle[2], prevCandle[2]) - (currAtr * 0.05)) * 100) / 100;
@@ -598,14 +624,57 @@ export function analyzePro(
   const isChasing = distFromOptimalPct > 0.45 && !((price >= optimalEntryZone.low && price <= optimalEntryZone.high));
 
   const isPriceNearOptimalZone = (price >= optimalEntryZone.low && price <= optimalEntryZone.high) || (distFromOptimalPct <= 0.35);
+  const isObiAvailable = realObiData?.status === 'LIVE' &&
+    realObiData.obi !== null && Number.isFinite(realObiData.obi);
+  const isCvdAvailable = provOrderFlow.isRealTradeFlow === true &&
+    provOrderFlow.status === 'LIVE' &&
+    Number.isFinite(provOrderFlow.ageMs) &&
+    provOrderFlow.ageMs! >= 0 &&
+    provOrderFlow.ageMs! <= 5000 &&
+    Number.isFinite(provOrderFlow.cvdDelta) &&
+    Number.isFinite(provOrderFlow.takerDelta);
+  const isObiAligned = isObiAvailable &&
+    (confDirection === 'LONG' ? realObiData.obi! > 0.05 : realObiData.obi! < -0.05);
+  const isCvdAligned = isCvdAvailable &&
+    (confDirection === 'LONG'
+      ? provOrderFlow.cvdDelta > 0 && provOrderFlow.takerDelta > 0
+      : provOrderFlow.cvdDelta < 0 && provOrderFlow.takerDelta < 0);
+  const orderFlowConfirmation = isObiAvailable && isCvdAvailable
+    ? (isObiAligned && isCvdAligned ? 100 : (isObiAligned || isCvdAligned ? 50 : 0))
+    : null;
+  const isOrderFlowConfirmed = isObiAligned && isCvdAligned;
+  const failureToContinueStrength = volumeStrength === null
+    ? null
+    : isLiquiditySweep
+    ? Math.round(reclaimStrength * 0.7 + volumeStrength * 0.3)
+    : 0;
+  const triggerQualityComponents = [
+    eventStrength,
+    volumeStrength,
+    reclaimStrength,
+    orderFlowConfirmation,
+    failureToContinueStrength,
+  ];
+  const triggerQuality = {
+    qualityScore: triggerQualityComponents.every(
+      (value): value is number => value !== null && Number.isFinite(value)
+    )
+      ? Math.round(triggerQualityComponents.reduce((total, value) => total + value, 0) / 5)
+      : null,
+    eventStrength: Math.round(eventStrength),
+    volumeStrength: volumeStrength === null ? null : Math.round(volumeStrength),
+    reclaimStrength: Math.round(reclaimStrength),
+    orderFlowConfirmation,
+    failureToContinueStrength,
+    isOrderFlowConfirmed,
+  };
+  let isTriggerConfirmed = false;
   if (isPriceNearOptimalZone) {
     lifecycleState = 'ARMED';
-    // Confirmation trigger: Candle rejection / structure reclaim + OBI alignment
-    const isObiOk = confDirection === 'LONG' ? (realObiData?.obi ?? 0) >= -0.05 : (realObiData?.obi ?? 0) <= 0.05;
-    if (confDirection === 'LONG' && (price >= triggerCandlePrice || (lastCandle[3] > lastCandle[0] && lastCandle[2] <= optimalEntryZone.high)) && isObiOk && !isChasing) {
-      isTriggerConfirmed = true;
-      lifecycleState = 'TRIGGERED';
-    } else if (confDirection === 'SHORT' && (price <= triggerCandlePrice || (lastCandle[3] < lastCandle[0] && lastCandle[1] >= optimalEntryZone.low)) && isObiOk && !isChasing) {
+    const isCandleTriggerConfirmed = confDirection === 'LONG'
+      ? price >= triggerCandlePrice || (lastCandle[3] > lastCandle[0] && lastCandle[2] <= optimalEntryZone.high)
+      : price <= triggerCandlePrice || (lastCandle[3] < lastCandle[0] && lastCandle[1] >= optimalEntryZone.low);
+    if (isCandleTriggerConfirmed && isOrderFlowConfirmed && !isChasing) {
       isTriggerConfirmed = true;
       lifecycleState = 'TRIGGERED';
     }
@@ -677,7 +746,7 @@ export function analyzePro(
   }
 
   // 5. Order Flow & CVD Calculation (Strictly Distinct from L2 Depth OBI)
-  const orderFlow = calculateOrderFlowFeatures(candles);
+  const orderFlow = provOrderFlow;
   const cvdDelta = orderFlow.cvdDelta;
   const cvdDivergence = orderFlow.cvdDivergence;
   const takerBuyVol = orderFlow.takerBuyVol;
@@ -785,42 +854,50 @@ export function analyzePro(
     distanceFromIdealZonePct: Math.round(distFromOptimalPct * 100) / 100
   };
 
-  const nowMs = Date.now();
+  const observedAtMs = Date.now();
+  const isDirectionalRejection = confDirection === 'LONG'
+    ? lastCandle[3] > lastCandle[0] && lastCandle[2] < lastCandle[0]
+    : lastCandle[3] < lastCandle[0] && lastCandle[1] > lastCandle[0];
+  const isDirectionalDisplacement = currAtr > 0 &&
+    (confDirection === 'LONG'
+      ? lastCandle[3] > lastCandle[0]
+      : lastCandle[3] < lastCandle[0]) &&
+    Math.abs(lastCandle[3] - lastCandle[0]) >= currAtr * 0.5;
   const eventSequence = [
     {
       stage: 'LIQUIDITY_SWEEP' as const,
-      passed: Boolean(sharedDecision.pipeline.setupType === 'LIQUIDITY_SWEEP'),
-      timestampUtc: nowMs - 120000,
-      descriptionFa: 'بررسی شکار نقدینگی و جاروب استاپ‌ها در سقف/کف ماکرو'
+      passed: isLiquiditySweep,
+      timestampUtc: observedAtMs,
+      descriptionFa: 'جاروب آخرین سقف/کف قبلی و بازگشت قیمت در همین اسنپ‌شات'
     },
     {
       stage: 'REJECTION' as const,
-      passed: Boolean(!sharedDecision.exhaustion.isExhausted),
-      timestampUtc: nowMs - 60000,
-      descriptionFa: 'عدم خستگی حرکت و ثبت ریجکشن معتبر'
+      passed: isDirectionalRejection && isLiquiditySweep,
+      timestampUtc: observedAtMs,
+      descriptionFa: 'ریجکشن جهت‌دار کندل جاری پس از جاروب نقدینگی'
     },
     {
       stage: 'DISPLACEMENT' as const,
-      passed: Boolean(confScore >= 3.5),
-      timestampUtc: nowMs - 30000,
-      descriptionFa: 'پرتاب مومنتوم با تایید همگرایی ارکان تحلیلی'
+      passed: isDirectionalDisplacement,
+      timestampUtc: observedAtMs,
+      descriptionFa: 'جابجایی جهت‌دار کندل جاری با بدنه حداقل نیم ATR'
     },
     {
       stage: 'RETEST' as const,
       passed: Boolean(!isChasing),
-      timestampUtc: nowMs,
+      timestampUtc: observedAtMs,
       descriptionFa: 'تثبیت و بازآزمایی محدوده تعادلی بدون حرکت شتاب‌زده'
     },
     {
       stage: 'TRIGGER_CONFIRMATION' as const,
       passed: Boolean(isTriggerConfirmed),
-      timestampUtc: nowMs,
-      descriptionFa: 'تایید نهایی سیگنال محرک ورود با فلو اردر بوک'
+      timestampUtc: observedAtMs,
+      descriptionFa: 'تایید کندل جاری همراه با OBI و CVD واقعی هم‌جهت'
     },
     {
       stage: 'ENTRY_READY' as const,
       passed: Boolean(signalOk && !isChasing),
-      timestampUtc: nowMs,
+      timestampUtc: observedAtMs,
       descriptionFa: 'آماده ورود معاملاتی بر پایه پارامترهای کنترل ریسک'
     }
   ];
@@ -845,7 +922,8 @@ export function analyzePro(
     maePctExpected: expectedMaePct,
     mfePctExpected: expectedMfePct,
     entryQualityProfile,
-    eventSequence
+    eventSequence,
+    triggerQuality
   };
 
   const baseResult: AnalysisResult = {

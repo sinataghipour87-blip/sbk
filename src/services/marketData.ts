@@ -638,6 +638,10 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
       const oldestTime = parseInt(trades[trades.length - 1].time || '0', 10);
       const newestTime = parseInt(trades[0].time || '0', 10);
       const timespanSec = Math.max(1, (newestTime - oldestTime) / 1000);
+      const ageMs = Date.now() - newestTime;
+      if (!Number.isFinite(newestTime) || newestTime <= 0 || ageMs < 0) {
+        throw new Error('Live trade-flow timestamp is invalid or in the future.');
+      }
 
       trades.forEach((t) => {
         const size = parseFloat(t.size || '0');
@@ -677,7 +681,9 @@ export async function fetchRealTradeFlowCvd(): Promise<OrderFlowFeatures> {
         cumulativeDelta: Math.round(cumulativeDelta * 100) / 100,
         deltaVelocity: Math.round(deltaVelocity * 100) / 100,
         isRealTradeFlow: true,
-        status: 'LIVE'
+        status: ageMs <= 5000 ? 'LIVE' : 'STALE',
+        timestampUtc: newestTime,
+        ageMs,
       };
 
       setCache(cacheKey, res);

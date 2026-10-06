@@ -3,6 +3,7 @@ import {
   EntryOpportunityReport,
   EntryOpportunitySurfaceReport,
   OpportunityLifecycle,
+  TriggerQualityMetrics,
 } from '../types/trading';
 
 /**
@@ -31,6 +32,7 @@ export class EntryOpportunityAndTimingService {
     isTriggerConfirmed: boolean;
     isModelEnsembleHealthy: boolean;
     fillProbabilityPct?: number | null;
+    triggerQuality?: TriggerQualityMetrics | null;
   }): EntryOpportunitySurfaceReport {
     const {
       currentPrice, direction, atr, stopPrice, targetPrice, calibratedProbabilityPct,
@@ -38,6 +40,7 @@ export class EntryOpportunityAndTimingService {
       askDepthUsd, orderNotionalUsd, isTriggerConfirmed,
       isModelEnsembleHealthy,
       fillProbabilityPct = null,
+      triggerQuality = null,
     } = params;
     if (
       !Number.isFinite(currentPrice) || currentPrice <= 0 ||
@@ -69,12 +72,51 @@ export class EntryOpportunityAndTimingService {
         Number.isFinite(calibratedProbabilityPct) &&
         calibratedProbabilityPct > 0 && calibratedProbabilityPct <= 100;
       const hasValidRiskReward = direction !== 'NEUTRAL' &&
+        Number.isFinite(entryPrice) && entryPrice > 0 &&
         Number.isFinite(stopDistance) && stopDistance > 0 &&
         Number.isFinite(reward) && reward > 0;
       const costR = slippageBps !== null ? (slippageBps / 10000) * currentPrice / stopDistance : null;
       const expectedValueR = hasProbability && hasValidRiskReward && costR !== null
         ? (calibratedProbabilityPct! / 100) * (reward / stopDistance) -
           (1 - calibratedProbabilityPct! / 100) - costR
+        : null;
+      const pointFillProbability = fillProbabilityPct !== null && Number.isFinite(fillProbabilityPct) &&
+        fillProbabilityPct >= 0 && fillProbabilityPct <= 100 ? fillProbabilityPct : null;
+      const validMaeMfe = expectedMaeR !== null && Number.isFinite(expectedMaeR) && expectedMaeR >= 0 &&
+        expectedMfeR !== null && Number.isFinite(expectedMfeR) && expectedMfeR >= 0 &&
+        expectedMaeR + expectedMfeR > 0;
+      const rewardRiskRatio = hasValidRiskReward ? reward / stopDistance : null;
+      const maeMfeScore = validMaeMfe
+        ? (expectedMfeR! / (expectedMaeR! + expectedMfeR!)) * 100
+        : null;
+      const qualityComponents = [
+        expectedValueR !== null ? {
+          score: Math.max(0, Math.min(100, 100 * expectedValueR / (1 + expectedValueR))),
+          weight: 35,
+        } : null,
+        pointFillProbability !== null ? { score: pointFillProbability, weight: 20 } : null,
+        slippageBps !== null && Number.isFinite(slippageBps)
+          ? {
+              score: reward > 0
+                ? Math.max(0, Math.min(100, 100 * (1 - ((slippageBps / 10000) * entryPrice) / reward)))
+                : 0,
+              weight: 15,
+            }
+          : null,
+        hasLiquidity
+          ? { score: Math.max(0, Math.min(100, (liquidityUsd! / orderNotionalUsd) * 10)), weight: 10 }
+          : null,
+        rewardRiskRatio !== null
+          ? { score: Math.max(0, Math.min(100, (rewardRiskRatio / 3) * 100)), weight: 10 }
+          : null,
+        maeMfeScore !== null ? { score: maeMfeScore, weight: 10 } : null,
+      ].filter((component): component is { score: number; weight: number } => component !== null);
+      const qualityWeight = qualityComponents.reduce((total, component) => total + component.weight, 0);
+      const qualityScore = expectedValueR !== null && expectedValueR > 0 && qualityWeight > 0
+        ? Math.round(qualityComponents.reduce(
+            (total, component) => total + component.score * component.weight,
+            0
+          ) / qualityWeight)
         : null;
       return {
         entryPrice,
@@ -83,24 +125,29 @@ export class EntryOpportunityAndTimingService {
         expectedMaeR,
         expectedMfeR,
         expectedDurationSeconds,
-        fillProbabilityPct: fillProbabilityPct !== null && Number.isFinite(fillProbabilityPct) &&
-          fillProbabilityPct >= 0 && fillProbabilityPct <= 100 ? fillProbabilityPct : null,
+        fillProbabilityPct: pointFillProbability,
         slippageBps: slippageBps === null ? null : Math.round(slippageBps * 100) / 100,
         stopDistance: hasValidRiskReward ? Math.round(stopDistance * 100) / 100 : null,
         reward: hasValidRiskReward ? Math.round(reward * 100) / 100 : null,
         liquidityUsd: hasLiquidity ? liquidityUsd : null,
-        qualityScore: expectedValueR === null ? null : Math.round(expectedValueR * 1000) / 1000,
+        qualityScore,
       };
     });
 
     const bestPoint = points
-      .filter(point => point.qualityScore !== null && point.qualityScore > 0)
+      .filter(point => point.expectedValueR !== null && point.expectedValueR > 0 &&
+        point.qualityScore !== null && point.qualityScore > 0)
       .reduce<typeof points[number] | null>(
-        (best, point) => best === null || point.qualityScore! > best.qualityScore! ? point : best,
+        (best, point) => best === null ||
+          point.qualityScore! > best.qualityScore! ||
+          (point.qualityScore === best.qualityScore && point.expectedValueR! > best.expectedValueR!)
+          ? point
+          : best,
         null
       );
     const goodPoints = bestPoint
-      ? points.filter(point => point.qualityScore !== null && point.qualityScore! >= bestPoint.qualityScore! * 0.95)
+      ? points.filter(point => point.qualityScore !== null &&
+        point.qualityScore! >= bestPoint.qualityScore! * 0.95)
       : [];
     const entryZone = goodPoints.length > 0
       ? {
@@ -113,8 +160,8 @@ export class EntryOpportunityAndTimingService {
     const selectedPoint = isPriceAtOptimalEntry
       ? bestPoint
       : null;
-    const fillAvailable = selectedPoint?.fillProbabilityPct !== null &&
-      selectedPoint?.fillProbabilityPct !== undefined;
+    const fillAvailable = bestPoint?.fillProbabilityPct !== null &&
+      bestPoint?.fillProbabilityPct !== undefined;
     const hasLiveLiquidityCost = validMarketInputs &&
       points.some(point => point.liquidityUsd !== null && point.slippageBps !== null);
     const canExecute = direction !== 'NEUTRAL' &&
@@ -122,7 +169,8 @@ export class EntryOpportunityAndTimingService {
       validMarketInputs &&
       selectedPoint !== null &&
       isTriggerConfirmed &&
-      fillAvailable;
+      selectedPoint.fillProbabilityPct !== null &&
+      triggerQuality?.isOrderFlowConfirmed === true;
     const mode: EntryOpportunitySurfaceReport['mode'] = canExecute
       ? 'EXECUTE'
       : bestPoint && calibratedProbabilityPct !== null && isModelEnsembleHealthy
@@ -150,6 +198,8 @@ export class EntryOpportunityAndTimingService {
             ? 'WAIT FOR POSITIVE EV AND LIVE LIQUIDITY'
             : !isPriceAtOptimalEntry
             ? `WAIT FOR OPTIMAL ENTRY $${bestPoint.entryPrice.toFixed(2)}`
+            : triggerQuality?.isOrderFlowConfirmed !== true
+            ? 'WAIT FOR LIVE CVD AND ORDER-FLOW CONFIRMATION'
             : !isTriggerConfirmed
             ? 'WAIT FOR LIVE TRIGGER CONFIRMATION'
             : !fillAvailable
@@ -161,6 +211,7 @@ export class EntryOpportunityAndTimingService {
       mode,
       direction,
       points,
+      triggerQuality: triggerQuality ?? undefined,
       entryZone,
       optimalEntryPrice: bestPoint?.entryPrice ?? null,
       isPriceAtOptimalEntry,

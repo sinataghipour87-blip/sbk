@@ -167,6 +167,8 @@ export interface OrderFlowFeatures {
   deltaVelocity?: number; // Delta velocity (volume/sec) (Item 11)
   isRealTradeFlow?: boolean; // True if from live trade feed, false if unavailable (Item 11)
   status?: FeedStatus; // LIVE / UNAVAILABLE (Item 11)
+  timestampUtc?: number;
+  ageMs?: number;
 }
 
 export interface CanonicalExchangeFeed {
@@ -251,6 +253,16 @@ export interface StructuralEventNode {
   descriptionFa: string;
 }
 
+export interface TriggerQualityMetrics {
+  qualityScore: number | null; // Heuristic 0-100 score, never a probability
+  eventStrength: number;
+  volumeStrength: number | null;
+  reclaimStrength: number;
+  orderFlowConfirmation: number | null;
+  failureToContinueStrength: number | null;
+  isOrderFlowConfirmed: boolean;
+}
+
 export interface EntryQualityProfile {
   expectedMaePct: number; // Historical expected adverse excursion before profit (e.g. 0.35%)
   expectedMfePct: number; // Historical expected favorable excursion (e.g. 1.85%)
@@ -276,6 +288,7 @@ export interface SetupContext {
   mfePctExpected: number;
   entryQualityProfile?: EntryQualityProfile;
   eventSequence?: StructuralEventNode[];
+  triggerQuality?: TriggerQualityMetrics;
 }
 
 export interface TradePosition {
@@ -979,13 +992,14 @@ export interface EntryOpportunitySurfacePoint {
   stopDistance: number | null;
   reward: number | null;
   liquidityUsd: number | null;
-  qualityScore: number | null;
+  qualityScore: number | null; // Composite 0-100 score, never a probability
 }
 
 export interface EntryOpportunitySurfaceReport {
   mode: HunterMode;
   direction: 'LONG' | 'SHORT' | 'NEUTRAL';
   points: EntryOpportunitySurfacePoint[];
+  triggerQuality?: TriggerQualityMetrics;
   entryZone: { min: number; max: number } | null;
   optimalEntryPrice: number | null;
   isPriceAtOptimalEntry: boolean;
