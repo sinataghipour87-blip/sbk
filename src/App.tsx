@@ -2410,18 +2410,41 @@ export default function App() {
   };
 
   // Realtime GARCH(1,1) Position SL Auto-Adjustment Handler
-  const handleUpdatePositionSl = useCallback((positionId: string, newSlPrice: number, _newSlPct: number, reasonFa: string) => {
-    setActivePositions((prev) => {
-      const updated = prev.map((p) => {
-        if (p.id === positionId) {
-          return { ...p, sl: newSlPrice };
-        }
-        return p;
+  const handleUpdatePositionSl = useCallback(async (positionId: string, newSlPrice: number, _newSlPct: number, reasonFa: string) => {
+    if (!Number.isFinite(newSlPrice) || newSlPrice <= 0) {
+      showNotification('❌ حد ضرر نامعتبر است و تغییری اعمال نشد.');
+      return;
+    }
+
+    if (!activePositionsRef.current.some((position) => position.id === positionId)) {
+      showNotification('❌ پوزیشن موردنظر در برنامه یافت نشد؛ حد ضرر تغییر نکرد.');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/exchange/update-stop-loss', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: positionId, stopLoss: newSlPrice }),
       });
+      const result = await response.json();
+
+      if (response.status !== 200 || result.success !== true) {
+        throw new Error(result.error || 'صرافی درخواست تغییر حد ضرر را تأیید نکرد.');
+      }
+
+      const updated = activePositionsRef.current.map((position) =>
+        position.id === positionId ? { ...position, sl: newSlPrice } : position
+      );
+      activePositionsRef.current = updated;
+      setActivePositions(updated);
       localStorage.setItem('quantum_positions', JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
+      showNotification(`🛡️ حد ضرر (${reasonFa}) پس از تأیید صرافی در $${newSlPrice.toLocaleString()} به‌روزرسانی شد.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'خطای نامشخص در ارتباط با صرافی.';
+      showNotification(`❌ حد ضرر به‌روزرسانی نشد و وضعیت محلی بدون تغییر ماند: ${message}`);
+    }
+  }, [showNotification]);
 
   // Manual trigger for 5% free margin hedge
   const handleTriggerManualHedge = useCallback(() => {
@@ -2884,7 +2907,6 @@ export default function App() {
                       if (activePositions && activePositions.length > 0) {
                         handleUpdatePositionSl(activePositions[0].id, newSl, 0, 'MFE Trailing');
                       }
-                      showNotification(`🛡️ تریلینگ استاپ بر مبنای MFE و بقای روند در $${newSl.toLocaleString()} به‌روزرسانی شد.`);
                     }}
                   />
                   <StatisticalProtectionAndMaximizationWidget
@@ -2898,7 +2920,6 @@ export default function App() {
                       if (activePositions && activePositions.length > 0) {
                         handleUpdatePositionSl(activePositions[0].id, newSl, 0, 'Statistical Protection');
                       }
-                      showNotification(`🛡️ استاپ آماری در $${newSl.toLocaleString()} به‌روزرسانی شد.`);
                     }}
                   />
                   <BrainPriorityCoordinatorPanel

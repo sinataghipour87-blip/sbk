@@ -1875,6 +1875,63 @@ app.get('/api/live/status', (req, res) => {
 });
 
 // Position closing, partial closing, unhedging, chipping, and DCA endpoints
+app.post('/api/exchange/update-stop-loss', async (req, res) => {
+    const { id, stopLoss } = req.body || {};
+    if (!id || typeof stopLoss !== 'number' || !Number.isFinite(stopLoss) || stopLoss <= 0) {
+        return res.status(400).json({ success: false, error: 'شناسه پوزیشن و مقدار معتبر حد ضرر الزامی است.' });
+    }
+
+    const creds = loadServerCredentials();
+    if (!creds || !creds.apiKey || !creds.apiSecret) {
+        return res.status(403).json({ success: false, error: 'کلیدهای صرافی یافت نشد.' });
+    }
+
+    const position = activePositions.find((item) => item.id === id);
+    if (!position) {
+        return res.status(404).json({ success: false, error: 'پوزیشن در سرور یافت نشد.' });
+    }
+
+    try {
+        const baseUrl = creds.isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+        const timestamp = (Date.now() + bybitTimeOffset).toString();
+        const recvWindow = getDynamicRecvWindow();
+        const payload = JSON.stringify({
+            category: 'linear',
+            symbol: 'BTCUSDT',
+            tpslMode: 'Full',
+            positionIdx: 0,
+            stopLoss: String(stopLoss),
+            slTriggerBy: 'LastPrice'
+        });
+        const signature = generateBybitV5Signature(creds.apiKey, creds.apiSecret, timestamp, recvWindow, payload);
+        const exchangeResponse = await fetch(`${baseUrl}/v5/position/trading-stop`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-BAPI-API-KEY': creds.apiKey,
+                'X-BAPI-SIGN': signature,
+                'X-BAPI-TIMESTAMP': timestamp,
+                'X-BAPI-RECV-WINDOW': recvWindow
+            },
+            body: payload
+        });
+        const data = await exchangeResponse.json();
+
+        if (exchangeResponse.status !== 200 || data.retCode !== 0) {
+            return res.status(502).json({
+                success: false,
+                error: data.retMsg || 'صرافی درخواست تغییر حد ضرر را تأیید نکرد.'
+            });
+        }
+
+        activePositions = activePositions.map((item) => item.id === id ? { ...item, sl: stopLoss } : item);
+        writeDb<TradePosition[]>(POSITIONS_DB, activePositions);
+        return res.status(200).json({ success: true, message: 'حد ضرر در صرافی با موفقیت به‌روزرسانی شد.' });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: 'خطا در ارتباط با صرافی هنگام تغییر حد ضرر.' });
+    }
+});
+
 app.post('/api/exchange/close-position', async (req, res) => {
     const { id } = req.body || {};
     if (!id) {
