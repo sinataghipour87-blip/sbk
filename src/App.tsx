@@ -5,7 +5,6 @@ import { TickerBar } from './components/TickerBar';
 import { OrderExecutionPanel } from './components/OrderExecutionPanel';
 import { StrategyAndIndicators } from './components/StrategyAndIndicators';
 import { HistoryDashboard } from './components/HistoryDashboard';
-import { BacktestTool } from './components/BacktestTool';
 import { DcaCalculator } from './components/DcaCalculator';
 import { LiquidityRiskPanel } from './components/LiquidityRiskPanel';
 import { DemoTestingSandbox } from './components/DemoTestingSandbox';
@@ -16,14 +15,12 @@ import { LossRecoveryPanel, LossRecoveryState } from './components/LossRecoveryP
 import { SmartEnginesHub } from './components/SmartEnginesHub';
 import { WavePredictionEngineWidget } from './components/WavePredictionEngineWidget';
 import { CentralDatasetPerformanceMatrixWidget } from './components/CentralDatasetPerformanceMatrixWidget';
-import { EventDrivenBacktestAuditWidget } from './components/EventDrivenBacktestAuditWidget';
 import { MultiBrainConsensusPanel } from './components/MultiBrainConsensusPanel';
 import { TenBrainArchitecturePanel } from './components/TenBrainArchitecturePanel';
 import { TenBrainRadarConsensusWidget } from './components/TenBrainRadarConsensusWidget';
 import { ActivityFrequencyMonitorWidget } from './components/ActivityFrequencyMonitorWidget';
 import { VolatilitySpikePredictorWidget } from './components/VolatilitySpikePredictorWidget';
 import { FundingPriceCorrelationWidget } from './components/FundingPriceCorrelationWidget';
-import { TenBrainWeeklyReportWidget } from './components/TenBrainWeeklyReportWidget';
 import { RealtimeSynchronizerWidget } from './components/RealtimeSynchronizerWidget';
 import { IndexedDbBrainMemoryWidget } from './components/IndexedDbBrainMemoryWidget';
 import { DistributedMemoryCacheWidget } from './components/DistributedMemoryCacheWidget';
@@ -2970,7 +2967,6 @@ export default function App() {
                   <WhaleSignalStatisticalProofWidget />
                   <EarlyWarningProtocolWidget analysis={analysis} />
                   <BrainStrategicBufferWidget currentVolatility={analysis?.volatilityPct ?? 1.4} />
-                  <TenBrainWeeklyReportWidget recentHistory={getTradeHistory()} />
                 </div>
               )}
 
