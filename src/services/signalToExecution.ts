@@ -953,14 +953,23 @@ export function buildExecutionPosition(
     rejectionReason = pipelineResult.masterDecision.masterVerdictFa || pipelineResult.waitReasonFa || 'عدم صدور مجوز از فرامدل و گیت تصمیم‌گیری';
   }
 
+  const pipelineDirectionIsExecutable =
+    pipelineResult.direction === 'LONG' || pipelineResult.direction === 'SHORT';
+  if (pipelineResult.decision !== 'EXECUTE_APPROVED' || !pipelineDirectionIsExecutable) {
+    isRejected = true;
+    rejectionReason = pipelineResult.decision !== 'EXECUTE_APPROVED'
+      ? pipelineResult.waitReasonFa || `تصمیم پایپ‌لاین ${pipelineResult.decision} است؛ اجرای معامله مجاز نیست.`
+      : `جهت پایپ‌لاین (${pipelineResult.direction}) معتبر نیست؛ اجرای معامله فقط با LONG یا SHORT مجاز است.`;
+  }
+
   const uniquePosSuffix = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().substring(0, 8) : Date.now().toString(36);
   const positionId = pipelineResult.auditTrailDraft?.tradeId || `POS_${Date.now()}_${uniquePosSuffix}`;
   const nowMs = Date.now();
   const dirCode = direction === 'LONG' ? 'L' : 'S';
-  const uniqueClientOrderId = `QNT_BTC_${dirCode}_${nowMs}_${uniquePosSuffix.toUpperCase()}`;
-  const signalId = `SIG_${nowMs}_${uniquePosSuffix}`;
-  const decisionId = pipelineResult.tradeContract?.contractId || `DEC_${nowMs}_${uniquePosSuffix}`;
-  const executionAttemptId = `ATT_${nowMs}_1`;
+  const uniqueClientOrderId = isRejected ? '' : `QNT_BTC_${dirCode}_${nowMs}_${uniquePosSuffix.toUpperCase()}`;
+  const signalId = isRejected ? '' : `SIG_${nowMs}_${uniquePosSuffix}`;
+  const decisionId = isRejected ? '' : pipelineResult.tradeContract?.contractId || `DEC_${nowMs}_${uniquePosSuffix}`;
+  const executionAttemptId = isRejected ? '' : `ATT_${nowMs}_1`;
 
   return {
     id: positionId,
@@ -993,7 +1002,7 @@ export function buildExecutionPosition(
     liquidationPrice,
     invalidationPrice: analysis.invalidationPrice || logicTargets.sl,
     tradeThesis: analysis.tradeThesis || pipelineResult.tradeContract?.reasonForEntry,
-    setupContext: analysis.setupContext ? { ...analysis.setupContext, lifecycleState: 'EXECUTED' } : undefined,
+    setupContext: analysis.setupContext && !isRejected ? { ...analysis.setupContext, lifecycleState: 'EXECUTED' } : analysis.setupContext,
     maeUsd: 0,
     maePct: 0,
     mfeUsd: 0,
@@ -1005,9 +1014,9 @@ export function buildExecutionPosition(
     averageFillPrice: entryPrice,
     actualSlippageBps: fillAccounting.actualSlippageBps || 0.5,
     actualRiskUsd: riskUsd,
-    protectiveOrderVerified: true,
+    protectiveOrderVerified: !isRejected,
     emergencyProtectionActive: false,
-    tradeContract: pipelineResult.tradeContract,
+    tradeContract: isRejected ? undefined : pipelineResult.tradeContract,
     auditTrail: pipelineResult.auditTrailDraft,
     uniqueClientOrderId,
     signalId,
