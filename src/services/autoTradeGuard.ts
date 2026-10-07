@@ -1,8 +1,91 @@
-import { AnalysisResult, AutoTradePrerequisitesCheck, ExchangeOrderReconciliation, TradeHistory, TradePosition, PreTradeRiskGateCheck, PositionReconciliationReport, OpportunityClusteringCheck, RealisticFillSimulationResult } from '../types/trading';
+import { AnalysisResult, AutoTradePrerequisitesCheck, ExchangeOrderReconciliation, ExecutionMode, TradeHistory, TradePosition, PreTradeRiskGateCheck, PositionReconciliationReport, OpportunityClusteringCheck, RealisticFillSimulationResult } from '../types/trading';
 import { getAntiTiltStatus, evaluateAccountLevelRisk } from './kellyRisk';
 import { calculateRealisticOrderFill, evaluateOpportunityClusteringGuard } from './sharedStrategyCore';
 import { newsShockFirewallService } from './newsShockFirewall';
 import { globalKillSwitchEngine } from './globalKillSwitchEngine';
+
+const EXCHANGE_STATUS_CACHE_TTL_MS = 30_000;
+
+interface ExchangeSecurityStatus {
+  exchangeConnected: boolean;
+  apiPermissionValid: boolean;
+  clockSynchronized: boolean;
+  clockDriftMs: number;
+  exchangePositions: any[];
+  requestFailure: 'http' | 'network' | null;
+}
+
+let cachedExchangeStatus: { value: ExchangeSecurityStatus; expiresAt: number } | null = null;
+let exchangeStatusRequest: Promise<ExchangeSecurityStatus> | null = null;
+
+function getCachedExchangeSecurityStatus(): Promise<ExchangeSecurityStatus> {
+  if (cachedExchangeStatus && Date.now() < cachedExchangeStatus.expiresAt) {
+    return Promise.resolve(cachedExchangeStatus.value);
+  }
+
+  if (exchangeStatusRequest) {
+    return exchangeStatusRequest;
+  }
+
+  const request = (async (): Promise<ExchangeSecurityStatus> => {
+    try {
+      const res = await fetch('/api/exchange/status', {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        return {
+          exchangeConnected: false,
+          apiPermissionValid: false,
+          clockSynchronized: false,
+          clockDriftMs: 0,
+          exchangePositions: [],
+          requestFailure: 'http',
+        };
+      }
+
+      const data = await res.json();
+      const now = Date.now();
+      const serverTimestamp = data.serverTimestamp || now;
+      const clockDriftMs = Math.abs(now - serverTimestamp);
+
+      return {
+        exchangeConnected: !!data.connected,
+        apiPermissionValid: !!data.hasTradePermissions,
+        clockSynchronized: clockDriftMs < 1500,
+        clockDriftMs,
+        exchangePositions: data.activePositions || [],
+        requestFailure: null,
+      };
+    } catch {
+      return {
+        exchangeConnected: false,
+        apiPermissionValid: false,
+        clockSynchronized: false,
+        clockDriftMs: 0,
+        exchangePositions: [],
+        requestFailure: 'network',
+      };
+    }
+  })();
+
+  const trackedRequest = request
+    .then((value) => {
+      cachedExchangeStatus = {
+        value,
+        expiresAt: Date.now() + EXCHANGE_STATUS_CACHE_TTL_MS,
+      };
+      return value;
+    })
+    .finally(() => {
+      if (exchangeStatusRequest === trackedRequest) {
+        exchangeStatusRequest = null;
+      }
+    });
+
+  exchangeStatusRequest = trackedRequest;
+  return trackedRequest;
+}
 
 /**
  * Generates cryptographically secure, idempotent identifiers for trade orders
@@ -33,8 +116,25 @@ export function generateTradeIdentifiers(symbol: string = 'BTCUSDT', direction: 
 export async function verifyAutoTradePrerequisites(
   analysis: AnalysisResult | null,
   activePositions: TradePosition[],
-  tradeHistory: TradeHistory[]
+  tradeHistory: TradeHistory[],
+  executionMode: ExecutionMode
 ): Promise<AutoTradePrerequisitesCheck> {
+  if (executionMode !== 'LIVE') {
+    return {
+      isEligible: true,
+      exchangeConnected: true,
+      apiPermissionValid: true,
+      marketDataLive: true,
+      riskEngineHealthy: true,
+      executionEngineHealthy: true,
+      clockSynchronized: true,
+      positionStateSynchronized: true,
+      emergencyStopAvailable: true,
+      detailsFa: [`✅ حالت ${executionMode} فعال است؛ بررسی‌های اجرای واقعی رد شدند.`],
+      checkedAt: Date.now(),
+    };
+  }
+
   const detailsFa: string[] = [];
   const now = Date.now();
 
@@ -43,36 +143,27 @@ export async function verifyAutoTradePrerequisites(
   let apiPermissionValid = false;
   let clockSynchronized = false;
   let exchangePositions: any[] = [];
-  let serverTimestamp = now;
 
-  try {
-    const res = await fetch('/api/exchange/status', {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    if (res.ok) {
-      const data = await res.json();
-      exchangeConnected = !!data.connected;
-      apiPermissionValid = !!data.hasTradePermissions;
-      serverTimestamp = data.serverTimestamp || now;
-      const clockDriftMs = Math.abs(now - serverTimestamp);
-      clockSynchronized = clockDriftMs < 1500;
-      exchangePositions = data.activePositions || [];
+  const exchangeStatus = await getCachedExchangeSecurityStatus();
+  exchangeConnected = exchangeStatus.exchangeConnected;
+  apiPermissionValid = exchangeStatus.apiPermissionValid;
+  clockSynchronized = exchangeStatus.clockSynchronized;
+  exchangePositions = exchangeStatus.exchangePositions;
 
-      if (!exchangeConnected) {
-        detailsFa.push('❌ اتصال به سرور صرافی برقرار نیست یا کلیدهای امنیتی معتبر نیستند.');
-      }
-      if (!apiPermissionValid) {
-        detailsFa.push('❌ دسترسی معاملات فیوچرز (Order Execution) روی کلیدهای صرافی فعال نیست.');
-      }
-      if (!clockSynchronized) {
-        detailsFa.push(`❌ انحراف ساعت محلی با صرافی بیش از حد مجاز است (${clockDriftMs}ms).`);
-      }
-    } else {
-      detailsFa.push('❌ عدم پاسخگویی اندپوینت وضعیت صرافی سرور.');
-    }
-  } catch (err: any) {
+  if (exchangeStatus.requestFailure === 'http') {
+    detailsFa.push('❌ عدم پاسخگویی اندپوینت وضعیت صرافی سرور.');
+  } else if (exchangeStatus.requestFailure === 'network') {
     detailsFa.push('❌ خطا در برقراری ارتباط با ماژول امنیتی صرافی سرور.');
+  } else {
+    if (!exchangeConnected) {
+      detailsFa.push('❌ اتصال به سرور صرافی برقرار نیست یا کلیدهای امنیتی معتبر نیستند.');
+    }
+    if (!apiPermissionValid) {
+      detailsFa.push('❌ دسترسی معاملات فیوچرز (Order Execution) روی کلیدهای صرافی فعال نیست.');
+    }
+    if (!clockSynchronized) {
+      detailsFa.push(`❌ انحراف ساعت محلی با صرافی بیش از حد مجاز است (${exchangeStatus.clockDriftMs}ms).`);
+    }
   }
 
   // 3: Market Data LIVE Check
@@ -132,13 +223,11 @@ export async function verifyAutoTradePrerequisites(
   // 7: Emergency Stop Breaker Available
   const emergencyStopAvailable = typeof window !== 'undefined';
 
+  const liveExecutionChecksPassed = exchangeConnected && apiPermissionValid && clockSynchronized;
   const isEligible =
-    exchangeConnected &&
-    apiPermissionValid &&
+    liveExecutionChecksPassed &&
     marketDataLive &&
     riskEngineHealthy &&
-    executionEngineHealthy &&
-    clockSynchronized &&
     positionStateSynchronized &&
     emergencyStopAvailable;
 
@@ -537,4 +626,3 @@ export function simulateLiveOrderRealisticFill(params: {
     marketDepthUsd: depth,
   });
 }
-

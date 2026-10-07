@@ -82,7 +82,7 @@ import {
   getCanonicalMarketSnapshot 
 } from './services/marketData';
 import { analyzePro } from './services/analysisEngine';
-import { AnalysisResult, TradePosition, TradeHistory, UserSettings, SentimentData } from './types/trading';
+import { AnalysisResult, TradePosition, TradeHistory, UserSettings, SentimentData, ExecutionMode } from './types/trading';
 import { loadSettings, saveSettings } from './services/settings';
 import { saveTradeToHistory, getTradeHistory } from './services/history';
 import { calculateKellyRisk, getAntiTiltStatus, calculateDynamicKellyMargin, evaluateCognitiveConviction } from './services/kellyRisk';
@@ -91,6 +91,7 @@ import { setupBybitWebSocket } from './services/websocket';
 import { validatePrecisionEntry, generateClientSidePredictionFallback, updatePredictiveModelFeedbackLoop, evaluate15mTimingAndLifecycle, runDistributedMultiTimeframeBrains, calculateAiMtfConsensusCorrelation, evaluateFuturePredictability } from './services/predictiveEngine';
 import { evaluateSignalToExecution, buildExecutionPosition, calculateLogicTargets } from './services/signalToExecution';
 import { verifyAutoTradePrerequisites, reconcileOrderWithExchange } from './services/autoTradeGuard';
+import { getExecutionMode } from './services/executionMode';
 import { TfjsReinforcementLearningEngine } from './services/tfjsReinforcementLearningEngine';
 import { brainEvolutionHub } from './services/brainSelfEvolutionHub';
 import { AlertCircle, Settings, CheckCircle2, Cpu, Shield, Activity, BarChart2, Layers, Compass, Menu } from 'lucide-react';
@@ -189,6 +190,10 @@ export function calculateHedgeBreakEvenPrice(
 export default function App() {
   const [settings, setSettings] = useState<UserSettings>(() => loadSettings());
   const [showSidebar, setShowSidebar] = useState(false);
+  const executionModeRef = useRef<ExecutionMode | null>(null);
+  const handleExecutionModeSelected = useCallback((mode: ExecutionMode, _isLocalSelection: boolean) => {
+    executionModeRef.current = mode;
+  }, []);
   const [activeTab, setActiveTab] = useState<'chart' | 'strategy' | 'ai_risk' | 'smart_engines' | 'history_backtest'>('chart');
   const [rightActiveTab, setRightActiveTab] = useState<'trades' | 'wallet'>('trades');
   const [isDeepBlack, setIsDeepBlack] = useState<boolean>(() => {
@@ -1233,16 +1238,18 @@ export default function App() {
         const liveStatusRes = await fetch('/api/live/status');
         if (liveStatusRes.ok) {
           const liveStatusData = await liveStatusRes.json();
-          if (liveStatusData.activePositions) {
-            setActivePositions(liveStatusData.activePositions);
-            activePositionsRef.current = liveStatusData.activePositions;
-            localStorage.setItem('quantum_positions', JSON.stringify(liveStatusData.activePositions));
-          }
-          if (liveStatusData.liveAutoTradeEnabled !== undefined) {
-            if (settings.autoTradeEnabled !== liveStatusData.liveAutoTradeEnabled) {
-              const updated = { ...settings, autoTradeEnabled: liveStatusData.liveAutoTradeEnabled };
-              setSettings(updated);
-              saveSettings(updated);
+          if (executionModeRef.current !== 'PAPER') {
+            if (liveStatusData.activePositions) {
+              setActivePositions(liveStatusData.activePositions);
+              activePositionsRef.current = liveStatusData.activePositions;
+              localStorage.setItem('quantum_positions', JSON.stringify(liveStatusData.activePositions));
+            }
+            if (liveStatusData.liveAutoTradeEnabled !== undefined) {
+              if (settings.autoTradeEnabled !== liveStatusData.liveAutoTradeEnabled) {
+                const updated = { ...settings, autoTradeEnabled: liveStatusData.liveAutoTradeEnabled };
+                setSettings(updated);
+                saveSettings(updated);
+              }
             }
           }
         }
@@ -1254,14 +1261,14 @@ export default function App() {
         const exchangeStatusRes = await fetch('/api/exchange/status');
         if (exchangeStatusRes.ok) {
           const exchangeStatusData = await exchangeStatusRes.json();
-          if (exchangeStatusData.connected && exchangeStatusData.walletBalanceUsdt !== undefined) {
+          if (executionModeRef.current !== 'PAPER' && exchangeStatusData.connected && exchangeStatusData.walletBalanceUsdt !== undefined) {
             setBalance(exchangeStatusData.walletBalanceUsdt);
             balanceRef.current = exchangeStatusData.walletBalanceUsdt;
             localStorage.setItem('quantum_balance', exchangeStatusData.walletBalanceUsdt.toString());
           }
 
           // 84. Exchange Reconciliation - Exchange is the Source of Truth
-          if (exchangeStatusData.connected && exchangeStatusData.activePositions) {
+          if (executionModeRef.current !== 'PAPER' && exchangeStatusData.connected && exchangeStatusData.activePositions) {
             const exchangePositions = exchangeStatusData.activePositions || [];
             const currentLocalPositions = [...activePositionsRef.current];
             let reconciledLocalPositions: TradePosition[] = [];
@@ -1772,8 +1779,37 @@ export default function App() {
     // ریست وضعیت Fast Reload پس از شلیک موفقیت‌آمیز
     fastReloadReadyRef.current = false;
 
-    // ارسال سفارش زنده به صرافی با مهار Idempotency و گیت‌های امنیتی (Issues 27, 28, 29, 30)
+    // Resolve execution mode immediately before execution; unknown modes fail closed.
     (async () => {
+      let executionMode: ExecutionMode;
+      try {
+        executionMode = await getExecutionMode();
+        executionModeRef.current = executionMode;
+      } catch (err) {
+        fastReloadReadyRef.current = true;
+        const message = err instanceof Error ? err.message : 'خطای نامشخص';
+        showNotification(`🛑 دریافت حالت اجرا ناموفق بود؛ سفارش ارسال نشد: ${message}`);
+        return;
+      }
+
+      if (executionMode === 'PAPER') {
+        newPos.lifecycleStatus = 'FILLED';
+        const conviction = evaluateCognitiveConviction(currentRes, pred, signalEval.totalScorePct);
+        const updated = [...currentActive, newPos];
+        activePositionsRef.current = updated;
+        setActivePositions(updated);
+        localStorage.setItem('quantum_positions', JSON.stringify(updated));
+        showNotification(
+          `🧪 معامله دمو [${tradeName}] با ${conviction.labelFa} در Paper Trading ثبت شد: ${targetDir === 'LONG' ? 'خرید (LONG)' : 'فروش (SHORT)'} | قیمت $${newPos.entry.toFixed(1)}${scaleInMessage}`
+        );
+        return;
+      }
+
+      if (executionMode !== 'LIVE') {
+        showNotification(`🛑 ارسال سفارش متوقف شد؛ حالت ${executionMode} اجرای Auto-Pilot را مجاز نمی‌کند.`);
+        return;
+      }
+
       try {
         const orderQtyBtc = (newPos.initialMargin * newPos.lev / Math.max(1, currentRes.price)).toFixed(3);
         const orderRes = await fetch('/api/exchange/order', {
@@ -2490,14 +2526,39 @@ export default function App() {
     if (willEnable) {
       const targetSnapshot = latestAnalysisSnapshotRef.current || analysis;
       const tradeHistory = getTradeHistory();
+
+      let executionMode: ExecutionMode;
+      try {
+        executionMode = await getExecutionMode();
+        executionModeRef.current = executionMode;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'خطای نامشخص';
+        showNotification(`🛑 دریافت حالت اجرا ناموفق بود؛ ربات فعال نشد: ${message}`);
+        return;
+      }
       
       showNotification('🔍 در حال ارزیابی ۸ پیش‌شرط امنیتی فعال‌سازی ترید خودکار...');
-      const prereq = await verifyAutoTradePrerequisites(targetSnapshot, activePositions, tradeHistory);
+      const prereq = await verifyAutoTradePrerequisites(
+        targetSnapshot,
+        activePositions,
+        tradeHistory,
+        executionMode
+      );
 
       if (!prereq.isEligible) {
         const failedChecks = prereq.detailsFa.filter((d) => d.startsWith('❌'));
         const errorSummary = failedChecks.length > 0 ? failedChecks[0] : 'پیش‌شرط‌های امنیتی احراز نشد.';
         showNotification(`🛑 فعال‌سازی ترید خودکار متوقف شد: ${errorSummary}`);
+        return;
+      }
+
+      if (executionMode !== 'LIVE') {
+        const updated = { ...settings, autoTradeEnabled: true };
+        settingsRef.current = updated;
+        setSettings(updated);
+        saveSettings(updated);
+        fastReloadReadyRef.current = true;
+        showNotification(`✅ Auto-Pilot در حالت ${executionMode} به‌صورت محلی فعال شد؛ درخواست ادمین به سرور ارسال نشد.`);
         return;
       }
 
@@ -2510,8 +2571,10 @@ export default function App() {
         const data = await response.json();
         if (response.ok && data.success) {
           const updated = { ...settings, autoTradeEnabled: true };
+          settingsRef.current = updated;
           setSettings(updated);
           saveSettings(updated);
+          fastReloadReadyRef.current = true;
           showNotification('✅ تمام ۸ شرط امنیتی تایید شد: ترید خودکار (Auto-Pilot) در سرور فعال شد! 🚀');
         } else {
           showNotification(`🛑 خطا در فعال‌سازی سرور: ${data.error || 'پاسخ ناموفق'}`);
@@ -2520,6 +2583,26 @@ export default function App() {
         showNotification('🛑 خطا در برقراری ارتباط با سرور برای فعال‌سازی.');
       }
     } else {
+      let executionMode: ExecutionMode;
+      try {
+        executionMode = await getExecutionMode();
+        executionModeRef.current = executionMode;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'خطای نامشخص';
+        showNotification(`🛑 دریافت حالت اجرا ناموفق بود؛ وضعیت ربات تغییر نکرد: ${message}`);
+        return;
+      }
+
+      if (executionMode !== 'LIVE') {
+        const updated = { ...settings, autoTradeEnabled: false };
+        settingsRef.current = updated;
+        setSettings(updated);
+        saveSettings(updated);
+        fastReloadReadyRef.current = false;
+        showNotification(`⏸️ Auto-Pilot در حالت ${executionMode} به‌صورت محلی متوقف شد؛ درخواستی به سرور ارسال نشد.`);
+        return;
+      }
+
       try {
         const response = await fetch('/api/live/toggle-auto-trade', {
           method: 'POST',
@@ -2529,8 +2612,10 @@ export default function App() {
         const data = await response.json();
         if (response.ok && data.success) {
           const updated = { ...settings, autoTradeEnabled: false };
+          settingsRef.current = updated;
           setSettings(updated);
           saveSettings(updated);
+          fastReloadReadyRef.current = false;
           showNotification('⏸️ معامله خودکار SB در سرور متوقف شد.');
         } else {
           showNotification(`🛑 خطا در متوقف‌سازی سرور: ${data.error || 'پاسخ ناموفق'}`);
@@ -2579,6 +2664,56 @@ export default function App() {
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             <span>{notification}</span>
           </div>
+        </div>
+      )}
+
+      {showSidebar && (
+        <div className="fixed inset-0 z-[80]">
+          <button
+            type="button"
+            aria-label="بستن منوی سیستم"
+            onClick={() => setShowSidebar(false)}
+            className="fixed inset-0 bg-black/70 backdrop-blur-sm"
+          />
+          <aside
+            dir="rtl"
+            role="dialog"
+            aria-modal="true"
+            aria-label="منوی سیستم"
+            className="fixed right-0 top-0 z-10 flex h-full w-80 max-w-[85vw] flex-col border-l border-indigo-500/30 bg-slate-950/95 p-5 shadow-2xl shadow-indigo-950/60"
+          >
+            <div className="mb-6 flex items-center justify-between border-b border-slate-800 pb-4">
+              <div className="flex items-center gap-2 text-indigo-200">
+                <Settings className="h-5 w-5" />
+                <h2 className="font-bold">منوی سیستم</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="بستن منوی سیستم"
+                onClick={() => setShowSidebar(false)}
+                className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+              >
+                ×
+              </button>
+            </div>
+            <nav className="flex flex-col gap-2">
+              <button type="button" onClick={() => { setSystemHubTab('sb_models'); setShowSidebar(false); }} className="rounded-lg bg-slate-900 px-3 py-2 text-right text-sm text-slate-200 hover:bg-indigo-950">مدل‌های تخصصی هوش مصنوعی</button>
+              <button type="button" onClick={() => { setSystemHubTab('brains'); setShowSidebar(false); }} className="rounded-lg bg-slate-900 px-3 py-2 text-right text-sm text-slate-200 hover:bg-indigo-950">مغزها و شبکه اجماع</button>
+              <button type="button" onClick={() => { setSystemHubTab('scenarios'); setShowSidebar(false); }} className="rounded-lg bg-slate-900 px-3 py-2 text-right text-sm text-slate-200 hover:bg-indigo-950">سناریوها و بازیابی</button>
+              <button type="button" onClick={() => { setSystemHubTab('volatility_risk'); setShowSidebar(false); }} className="rounded-lg bg-slate-900 px-3 py-2 text-right text-sm text-slate-200 hover:bg-indigo-950">نوسان و مدیریت ریسک</button>
+              <button type="button" onClick={() => { setSystemHubTab('flow_whales'); setShowSidebar(false); }} className="rounded-lg bg-slate-900 px-3 py-2 text-right text-sm text-slate-200 hover:bg-indigo-950">جریان سفارش و نقدینگی</button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSidebar(false);
+                  document.getElementById('execution-governor')?.scrollIntoView({ behavior: 'smooth' });
+                }}
+                className="mt-3 rounded-lg border border-emerald-700/50 bg-emerald-950/50 px-3 py-2 text-right text-sm text-emerald-200 hover:bg-emerald-900/70"
+              >
+                تنظیمات حالت اجرا
+              </button>
+            </nav>
+          </aside>
         </div>
       )}
 
@@ -3003,7 +3138,9 @@ export default function App() {
           </div>
       </div>
 
-      <ExecutionGovernorDashboard />
+      <div id="execution-governor">
+        <ExecutionGovernorDashboard onModeSelected={handleExecutionModeSelected} />
+      </div>
 
 
       {/* Root-Level Floating Wallet Dropdown Modal */}

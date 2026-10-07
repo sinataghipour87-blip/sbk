@@ -56,7 +56,7 @@ app.use((req, res, next) => {
 // Configure Rate Limiter for API paths
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 200, // limit each IP to 200 requests per window
+    max: 1000, // Keep general API traffic separate from sensitive LIVE operations.
     standardHeaders: true,
     legacyHeaders: false,
     validate: {
@@ -67,6 +67,35 @@ const apiLimiter = rateLimit({
     }
 });
 app.use('/api/', apiLimiter);
+
+const liveOperationLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    passOnStoreError: false,
+    validate: {
+        xForwardedForHeader: false,
+    },
+    skip: (req) => req.method === 'GET' || req.method === 'HEAD',
+    message: {
+        error: 'تعداد درخواست‌های عملیات LIVE بیش از حد مجاز است. لطفا ۱۵ دقیقه دیگر تلاش کنید.'
+    }
+});
+
+const liveModeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    passOnStoreError: false,
+    validate: {
+        xForwardedForHeader: false,
+    },
+    message: {
+        error: 'تعداد درخواست‌های تغییر حالت LIVE بیش از حد مجاز است. لطفا ۱۵ دقیقه دیگر تلاش کنید.'
+    }
+});
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -210,11 +239,18 @@ let executionSettings: ExecutionSettings = {
     lastChangedAt: Date.now()
 };
 
+const executionModeLimiter: express.RequestHandler = (req, res, next) => {
+    if (req.body?.mode === 'LIVE' || executionSettings.mode === 'LIVE') {
+        return liveModeLimiter(req, res, next);
+    }
+    next();
+};
+
 app.get('/api/execution/settings', (req, res) => {
     res.json(executionSettings);
 });
 
-app.post('/api/execution/mode', requireAdminAuth, (req, res) => {
+app.post('/api/execution/mode', executionModeLimiter, requireAdminAuth, (req, res) => {
     const { mode, liveCapitalCeilingPct } = req.body || {};
     if (mode) executionSettings.mode = mode;
     if (liveCapitalCeilingPct !== undefined) executionSettings.liveCapitalCeilingPct = liveCapitalCeilingPct;
@@ -416,6 +452,8 @@ function requireAdminAuth(req: express.Request, res: express.Response, next: exp
 }
 
 // Apply Admin Auth to all /api/exchange and /api/live routes (Item 1)
+app.use('/api/exchange', liveOperationLimiter);
+app.use('/api/live', liveOperationLimiter);
 app.use('/api/exchange', requireAdminAuth);
 app.use('/api/live', requireAdminAuth);
 
