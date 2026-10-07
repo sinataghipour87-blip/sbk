@@ -1337,6 +1337,7 @@ export function evaluateDynamicScenarioMatrix(
   analysis: Partial<AnalysisResult> | any,
   aiPrediction: any
 ): DynamicScenarioMatrixState {
+  const isLong = analysis?.direction !== 'SHORT';
   const price = typeof analysis?.price === 'number' && Number.isFinite(analysis.price) ? analysis.price : null;
   const reversalThreat = typeof aiPrediction?.reversal30m?.reversalProbability === 'number' &&
     Number.isFinite(aiPrediction.reversal30m.reversalProbability)

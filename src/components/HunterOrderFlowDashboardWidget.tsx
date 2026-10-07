@@ -16,7 +16,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { orderFlowEngine, OrderFlowSnapshot } from '../services/orderFlowEngine';
-import { hunterExecutionEngine, ExecutedOrderResult } from '../services/hunterExecutionEngine';
+import type { ExecutedOrderResult } from '../services/hunterExecutionEngine';
 import { AnalysisResult } from '../types/trading';
 
 interface HunterOrderFlowDashboardWidgetProps {
@@ -61,13 +61,18 @@ export const HunterOrderFlowDashboardWidget: React.FC<HunterOrderFlowDashboardWi
     }
     setIsExecuting(true);
     try {
-      const res = await hunterExecutionEngine.executeHunterOrder(
-        snapshot.activeSignal,
-        null, // Uses local authenticated simulation when API keys are unconfigured
-        1000,
-        10
-      );
-      setExecutionResult(res);
+      const response = await fetch('/api/hunter/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          signal: snapshot.activeSignal
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+      setExecutionResult(result as ExecutedOrderResult);
     } catch (err: any) {
       console.error(err);
     } finally {

@@ -85,9 +85,42 @@ export function runUnifiedDecisionPipeline(options: RunPipelineOptions): Decisio
     analysis?.candles || []
   );
 
-  const resolvedDir: 'LONG' | 'SHORT' =
-    targetDirection ||
-    (dualOppEvaluation.selectedOpportunity ? dualOppEvaluation.selectedOpportunity.direction : 'LONG');
+  const selectedDirection = dualOppEvaluation.selectedOpportunity?.direction ?? null;
+  const hasDirectionConflict = targetDirection !== undefined &&
+    selectedDirection !== null &&
+    targetDirection !== selectedDirection;
+  if (selectedDirection === null || hasDirectionConflict) {
+    const waitReasonFa = hasDirectionConflict
+      ? `تعارض جهت: سیگنال ${targetDirection} با ارزیابی مستقل ${selectedDirection} هم‌راستا نیست؛ اقدام نهایی HOLD است.`
+      : `${dualOppEvaluation.arbitrationVerdictFa} اقدام نهایی HOLD است.`;
+
+    return {
+      decision: 'WAIT_NO_TRADE',
+      direction: 'NEUTRAL',
+      activeStage: 'STAGE_14_EXECUTION',
+      stages: [{
+        id: 'STAGE_14_EXECUTION',
+        name: 'Execution Final Approval',
+        nameFa: '۱۴. حل تعارض جهت و مجوز نهایی',
+        passed: false,
+        status: 'FAILED',
+        value: 'HOLD',
+        threshold: 'جهت یکتا و تأییدشده برای معامله',
+        reasonFa: waitReasonFa,
+      }],
+      passedStagesCount: 0,
+      totalStagesCount: 1,
+      isEdgeProven: false,
+      expectedValueUsd: null,
+      expectedR: null,
+      calibratedWinProb: null,
+      waitReasonFa,
+      prerequisitesToArmFa: ['رفع تعارض و دریافت ارزیابی مستقل با جهت یکتای معتبر'],
+      evaluatedAtIso: timestampIso,
+    };
+  }
+
+  const resolvedDir: 'LONG' | 'SHORT' = targetDirection ?? selectedDirection;
 
   const isLong = resolvedDir === 'LONG';
   const price = analysis?.price || 0;

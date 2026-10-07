@@ -94,7 +94,7 @@ export const TrendSurvivalAndMfeTrailingWidget: React.FC<Props> = ({
     return 'text-rose-400 border-rose-500/30 bg-rose-500/10';
   };
 
-  const getFactorBadge = (status: 'EXCELLENT' | 'HEALTHY' | 'DEGRADING' | 'FAILED') => {
+  const getFactorBadge = (status: 'EXCELLENT' | 'HEALTHY' | 'DEGRADING' | 'FAILED' | 'UNKNOWN') => {
     switch (status) {
       case 'EXCELLENT':
         return <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">عالی</span>;

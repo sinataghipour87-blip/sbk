@@ -48,20 +48,35 @@ export async function fetchBybit(interval = '15', limit = 150): Promise<{ candle
     parseFloat(item[4]),
     parseFloat(item[5]),
   ]);
+  if (!candles.every(isValidMarketCandle)) {
+    throw new Error('Bybit returned invalid futures candles');
+  }
   return { candles, latencyMs };
 }
 
+function isValidMarketCandle(candle: Candle): boolean {
+  const [open, high, low, close, volume] = candle;
+  return [open, high, low, close, volume].every(Number.isFinite) &&
+    open > 0 && high > 0 && low > 0 && close > 0 && volume >= 0 &&
+    high >= Math.max(open, close) && low <= Math.min(open, close) && high >= low;
+}
+
 // Fetch Futures Ticker Prices (Last Price for Entry, Mark Price for Stop/Liquidation, Index Price for Benchmark) (Item 31 & 33)
-export async function fetchFuturesPrices(): Promise<FuturesPrices> {
+export async function fetchFuturesPrices(forceRefresh = false): Promise<FuturesPrices> {
   const cacheKey = 'futures_prices_bybit';
-  const cached = getCached<FuturesPrices>(cacheKey, 3000);
+  const cached = forceRefresh ? null : getCached<FuturesPrices>(cacheKey, 3000);
   const now = Date.now();
-  if (cached) {
+  if (
+    cached &&
+    Number.isFinite(cached.lastPrice) && cached.lastPrice > 0 &&
+    Number.isFinite(cached.markPrice) && cached.markPrice > 0 &&
+    Number.isFinite(cached.indexPrice) && cached.indexPrice > 0
+  ) {
     const ageMs = now - cached.timestampUtc;
     return {
       ...cached,
       ageMs,
-      status: ageMs > 5000 ? 'STALE' : cached.status
+      status: ageMs < 0 || ageMs > 3000 || cached.status !== 'LIVE' ? 'STALE' : 'LIVE'
     };
   }
 
@@ -78,18 +93,22 @@ export async function fetchFuturesPrices(): Promise<FuturesPrices> {
     const url = 'https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT';
     const { data, latencyMs } = await safeFetchJson<BybitTickerResp>(url, 3000);
     const item = data?.result?.list?.[0];
-    if (item && item.lastPrice && item.markPrice) {
+    if (item?.lastPrice && item.markPrice && item.indexPrice) {
       const lastPrice = parseFloat(item.lastPrice);
       const markPrice = parseFloat(item.markPrice);
-      const indexPrice = item.indexPrice ? parseFloat(item.indexPrice) : lastPrice;
+      const indexPrice = parseFloat(item.indexPrice);
+
+      if (![lastPrice, markPrice, indexPrice].every(value => Number.isFinite(value) && value > 0)) {
+        throw new Error('Bybit returned invalid live futures prices');
+      }
 
       const result: FuturesPrices = {
         lastPrice,   // Used for Entry Execution & Order Fill
         markPrice,   // Used for Stop Loss Trigger, Liquidation Engine & Risk Evaluation
         indexPrice,  // Spot Underlying Index Benchmark
-        timestampUtc: now,
-        isoTimeUtc: new Date(now).toISOString(),
-        ageMs: 0,
+        timestampUtc: Date.now(),
+        isoTimeUtc: new Date().toISOString(),
+        ageMs: Date.now() - now,
         latencyMs,
         source: 'Bybit Linear Futures Ticker (BTCUSDT)',
         status: 'LIVE'
@@ -135,6 +154,9 @@ export async function fetchKucoin(type = '15min'): Promise<{ candles: Candle[]; 
         item[4], // close
         item[5], // volume
       ]);
+      if (!candles.every(isValidMarketCandle)) {
+        throw new Error('KuCoin returned invalid futures candles');
+      }
       return { candles, latencyMs };
     }
   } catch {
@@ -234,10 +256,12 @@ export async function fetchCandles(forceRefresh = false): Promise<FetchCandlesRe
     const cached = getCached<FetchCandlesResult>(cacheKey, 15000); // 15s fresh TTL
     if (cached) {
       const ageMs = now - (cached.timestamp || now);
+      const status = ageMs > 15000 || cached.status !== 'LIVE' ? 'STALE' : 'LIVE';
+      isCurrentMarketDataLive = status === 'LIVE';
       return {
         ...cached,
         ageMs,
-        status: ageMs > 60000 ? 'STALE' : cached.status
+        status
       };
     }
   }
@@ -856,12 +880,17 @@ export function evaluateMarketDataQuality(
   let fpScore = 100;
   let fpStatus: FeedStatus = futuresPricesResult?.status || 'LIVE';
 
-  if (!futuresPricesResult || futuresPricesResult.status === 'UNAVAILABLE' || futuresPricesResult.lastPrice <= 0) {
+  if (
+    !futuresPricesResult ||
+    futuresPricesResult.status !== 'LIVE' ||
+    ![futuresPricesResult.lastPrice, futuresPricesResult.markPrice, futuresPricesResult.indexPrice]
+      .every(value => Number.isFinite(value) && value > 0)
+  ) {
     fpScore = 0;
     fpStatus = 'UNAVAILABLE';
     isVitalFeatureStale = true;
     reasonsFa.push('🛑 قیمت‌های زنده فیوچرز (Futures Last/Mark Price) قطع می‌باشند -> معامله مسدود شد');
-  } else if (fpAgeMs > 5000 || fpStatus === 'STALE') {
+  } else if (fpAgeMs < 0 || fpAgeMs > 5000 || fpStatus !== 'LIVE') {
     fpScore = 40;
     fpStatus = 'STALE';
     isVitalFeatureStale = true;

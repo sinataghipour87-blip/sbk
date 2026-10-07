@@ -755,6 +755,34 @@ app.post('/api/exchange/order', async (req, res) => {
         });
     }
 
+    const requestedQty = Number(qty);
+    if (!Number.isFinite(requestedQty) || requestedQty <= 0) {
+        return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: 'EXECUTION_BLOCKED: مقدار سفارش معتبر نیست.',
+            code: 'INVALID_ORDER_QTY'
+        });
+    }
+    if (orderType === 'Limit' && (!Number.isFinite(Number(price)) || Number(price) <= 0)) {
+        return res.status(400).json({
+            success: false,
+            blocked: true,
+            error: 'EXECUTION_BLOCKED: قیمت سفارش محدود معتبر نیست.',
+            code: 'INVALID_ORDER_PRICE'
+        });
+    }
+
+    const livePrices = await fetchFuturesPrices(true);
+    if (!hasFreshLiveFuturesPrices(livePrices)) {
+        return res.status(503).json({
+            success: false,
+            blocked: true,
+            error: 'EXECUTION_BLOCKED: قیمت زنده فیوچرز موجود یا تازه نیست؛ سفارش ارسال نشد.',
+            code: 'LIVE_MARKET_DATA_UNAVAILABLE'
+        });
+    }
+
     // Idempotency Check (Issue 30): Prevent double execution
     const uniqueKey = clientOrderId || decisionId || `ord_${symbol}_${side}_${Date.now()}`;
     const cached = orderIdempotencyCache.get(uniqueKey);
@@ -821,7 +849,7 @@ app.post('/api/exchange/order', async (req, res) => {
             symbol: symbol.replace('/', ''),
             side: side === 'LONG' ? 'Buy' : 'Sell',
             orderType: orderType,
-            qty: String(qty || '0.001'),
+            qty: String(requestedQty),
             timeInForce: 'GTC',
             orderLinkId: uniqueKey,
         };
@@ -890,7 +918,7 @@ app.post('/api/exchange/order', async (req, res) => {
             };
 
             // Build and add position to server-side activePositions so the daemon can manage it!
-            const entryPrice = price ? parseFloat(price) : (lastBtcPrice || 88000);
+            const entryPrice = livePrices.lastPrice;
             const finalQty = parseFloat(qty || '0.001');
             const leverage = parseFloat(req.body.leverage || '10');
             const calcMargin = (finalQty * entryPrice) / leverage;
@@ -2453,11 +2481,48 @@ app.get('/api/orderflow/snapshot', async (req, res) => {
 app.post('/api/hunter/execute', async (req, res) => {
     try {
         const { hunterExecutionEngine } = await import('./src/services/hunterExecutionEngine');
-        const { signal, creds, balance } = req.body || {};
+        const { signal } = req.body || {};
+        const creds = loadServerCredentials();
+        if (!creds?.apiKey || !creds.apiSecret) {
+            return res.status(403).json({
+                success: false,
+                status: 'REJECTED',
+                error: 'EXECUTION_BLOCKED: اعتبارنامهٔ صرافی در سرور موجود نیست.',
+                code: 'CREDENTIALS_REQUIRED'
+            });
+        }
+        const accountBalance = await fetchLiveAvailableUsdtBalance(creds);
+        if (!signal || !Number.isFinite(signal.entryPrice) || signal.entryPrice <= 0) {
+            return res.status(400).json({
+                success: false,
+                status: 'REJECTED',
+                error: 'EXECUTION_BLOCKED: قیمت سیگنال معتبر نیست.',
+                code: 'INVALID_SIGNAL_PRICE'
+            });
+        }
+        const signalAgeMs = Date.now() - Number(signal.timestamp);
+        if (!Number.isFinite(signalAgeMs) || signalAgeMs < 0 || signalAgeMs > 500) {
+            return res.status(409).json({
+                success: false,
+                status: 'REJECTED',
+                error: 'EXECUTION_BLOCKED: سیگنال کهنه یا فاقد زمان معتبر است.',
+                code: 'STALE_SIGNAL'
+            });
+        }
+        const livePrices = await fetchFuturesPrices(true);
+        if (!hasFreshLiveFuturesPrices(livePrices)) {
+            return res.status(503).json({
+                success: false,
+                status: 'REJECTED',
+                error: 'EXECUTION_BLOCKED: قیمت زنده فیوچرز موجود یا تازه نیست.',
+                code: 'LIVE_MARKET_DATA_UNAVAILABLE'
+            });
+        }
+        const validatedSignal = { ...signal, entryPrice: livePrices.lastPrice };
         const result = await hunterExecutionEngine.executeHunterOrder(
-            signal,
-            creds || null,
-            balance || 1000,
+            validatedSignal,
+            creds,
+            accountBalance,
             10
         );
         res.json(result);
@@ -2839,6 +2904,50 @@ async function reconcileWithBybit() {
 import { analyzePro } from './src/services/analysisEngine';
 import { evaluateSignalToExecution, buildExecutionPosition } from './src/services/signalToExecution';
 import { fetchBybit, fetchFearGreed, fetchDerivatives, fetchRealOrderBookImbalance, fetchFuturesPrices, evaluateMarketDataQuality } from './src/services/marketData';
+
+function hasFreshLiveFuturesPrices(prices: Awaited<ReturnType<typeof fetchFuturesPrices>>): boolean {
+    const ageMs = Date.now() - prices.timestampUtc;
+    return prices.status === 'LIVE' &&
+        Number.isFinite(prices.lastPrice) && prices.lastPrice > 0 &&
+        Number.isFinite(prices.markPrice) && prices.markPrice > 0 &&
+        Number.isFinite(prices.indexPrice) && prices.indexPrice > 0 &&
+        Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 5000;
+}
+
+async function fetchLiveAvailableUsdtBalance(creds: { apiKey: string; apiSecret: string; isTestnet: boolean }): Promise<number> {
+    const baseUrl = creds.isTestnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+    const timestamp = (Date.now() + bybitTimeOffset).toString();
+    const recvWindow = getDynamicRecvWindow();
+    const queryString = 'accountType=UNIFIED';
+    const signature = generateBybitV5Signature(creds.apiKey, creds.apiSecret, timestamp, recvWindow, queryString);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    try {
+        const response = await fetch(`${baseUrl}/v5/account/wallet-balance?${queryString}`, {
+            signal: controller.signal,
+            headers: {
+                'X-BAPI-API-KEY': creds.apiKey,
+                'X-BAPI-SIGN': signature,
+                'X-BAPI-TIMESTAMP': timestamp,
+                'X-BAPI-RECV-WINDOW': recvWindow,
+            }
+        });
+        if (!response.ok) throw new Error(`Balance API HTTP ${response.status}`);
+        const data = await response.json();
+        if (data.retCode !== 0 || !Array.isArray(data.result?.list)) {
+            throw new Error('Exchange did not return a valid account balance');
+        }
+        const usdt = data.result.list[0]?.coin?.find((coin: any) => coin.coin === 'USDT');
+        const availableBalance = Number(usdt?.availableToWithdraw);
+        if (!Number.isFinite(availableBalance) || availableBalance <= 0) {
+            throw new Error('Exchange available USDT balance is unavailable or invalid');
+        }
+        return availableBalance;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 
 let isAnalyzing = false;
 let lastStrategyCheckTime = 0;
