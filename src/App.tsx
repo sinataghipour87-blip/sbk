@@ -2170,7 +2170,7 @@ export default function App() {
   // If in profit: closes immediately and banks real profit.
   // If in loss: deploys the Cross-Hedge Breakeven Engine to freeze losses, neutralize delta,
   // and dynamically exit at net $0.00 (Zero-Loss) as the market oscillates, completely protecting balance.
-  const handleCloseTrade = (id?: string) => {
+  const handleCloseTrade = async (id?: string) => {
     const targetSnapshot = latestAnalysisSnapshotRef.current || analysis;
     if (!targetSnapshot) return;
     const targetId = id || (activePositions[0] ? activePositions[0].id : null);
@@ -2178,6 +2178,25 @@ export default function App() {
 
     const targetPos = activePositions.find((p) => p.id === targetId);
     if (!targetPos) return;
+
+    try {
+      const res = await fetch('/api/exchange/close-position', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: targetId }),
+      });
+      const responseData = await res.json();
+      if (!res.ok || responseData?.success !== true) {
+        showNotification(
+          `🛑 بستن پوزیشن ناموفق بود؛ پوزیشن در صرافی باز مانده است. ${responseData?.error || responseData?.message || `HTTP ${res.status}`}`
+        );
+        return;
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      showNotification(`🛑 ارتباط برای بستن پوزیشن ناموفق بود؛ پوزیشن در صرافی باز مانده است. ${errorMessage}`);
+      return;
+    }
 
     const curP = targetSnapshot.price;
     const entry = targetPos.entry;
@@ -2205,91 +2224,36 @@ export default function App() {
 
     const previousRealized = targetPos.realizedPnlUsd || 0;
     const rawTotalPnl = previousRealized + rawPnlUsd;
+    const newBal = Math.max(10, balance + rawPnlUsd);
+    setBalance(newBal);
+    balanceRef.current = newBal;
+    localStorage.setItem('quantum_balance', newBal.toString());
 
-    // REAL-WORLD LOGIC:
-    // If trade is in profit, close immediately and credit balance
-    if (rawTotalPnl >= 0) {
-      const finalPnlUsd = rawPnlUsd;
-      const totalTradePnl = rawTotalPnl;
+    const now = new Date();
+    const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    const historyEntry: TradeHistory = {
+      ...targetPos,
+      pnlUsd: rawTotalPnl,
+      pnlPct,
+      closedAt: timeStr,
+      closeReason: 'بستن دستی پوزیشن در صرافی 👤',
+    };
+    saveTradeToHistory(historyEntry);
 
-      const newBal = Math.max(10, balance + finalPnlUsd);
-      setBalance(newBal);
-      localStorage.setItem('quantum_balance', newBal.toString());
+    updatePredictiveModelFeedbackLoop({
+      strategyType: targetPos.name === 'SB' || targetPos.name === 'SBK' ? 'TREND_RIDER' : 'MICRO_SCALP',
+      realizedPnlUsd: rawTotalPnl,
+      exitReason: 'بستن دستی پوزیشن'
+    });
 
-      const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    const updated = activePositions.filter((p) => p.id !== targetId);
+    activePositionsRef.current = updated;
+    setActivePositions(updated);
+    localStorage.setItem('quantum_positions', JSON.stringify(updated));
 
-      const historyEntry: TradeHistory = {
-        ...targetPos,
-        pnlUsd: totalTradePnl,
-        pnlPct,
-        closedAt: timeStr,
-        closeReason: 'تسویه سود دستی کاربر 👤',
-      };
-      saveTradeToHistory(historyEntry);
-
-      // 🔄 ارسال بازخورد خودکار معامله بسته شده به ماژول Feedback-Loop مدل پیش‌بینی
-      updatePredictiveModelFeedbackLoop({
-        strategyType: targetPos.name === 'SB' || targetPos.name === 'SBK' ? 'TREND_RIDER' : 'MICRO_SCALP',
-        realizedPnlUsd: totalTradePnl,
-        exitReason: 'تسویه سود'
-      });
-
-      const updated = activePositions.filter((p) => p.id !== targetId);
-      setActivePositions(updated);
-      localStorage.setItem('quantum_positions', JSON.stringify(updated));
-
-      showNotification(`معامله با سود بسته شد. سود نهایی: +$${totalTradePnl.toFixed(2)}`);
-      return;
-    }
-
-    // IF TRADE IS IN LOSS:
-    // In real exchanges, you cannot erase loss by hitting market close.
-    // Instead, engage the Zero-Loss Cross-Hedge Engine immediately!
-    // This locks delta, freezes negative drawdown, and algorithmically liquidates both legs at Breakeven ($0.00).
-    if (!targetPos.hedgeActive) {
-      const origMargin = targetPos.initialMargin || targetPos.margin;
-      const counterDir = targetPos.dir === 'LONG' ? 'SHORT' : 'LONG';
-      const updated = activePositions.map((p) => {
-        if (p.id === targetId) {
-          return {
-            ...p,
-            hedgeActive: true,
-            recoveryStep: 2,
-            hedgeEntry: curP,
-            initialMargin: origMargin,
-            margin: origMargin * 2,
-            hedgeLockedPnlUsd: rawTotalPnl,
-          };
-        }
-        return p;
-      });
-
-      setActivePositions(updated);
-      localStorage.setItem('quantum_positions', JSON.stringify(updated));
-
-      showNotification(
-        `🛡️ موتور خروج سربه‌سر واقعی فعال شد: لگ هج معکوس (${counterDir}) در $${curP.toFixed(1)} ثبت گردید تا ضرر فریز شده و معامله در نقطه سربه‌سر ($0.00) تسویه گردد.`
-      );
-    } else {
-      // If already hedged, perform algorithmic breakeven flat settlement
-      const updated = activePositions.filter((p) => p.id !== targetId);
-      setActivePositions(updated);
-      localStorage.setItem('quantum_positions', JSON.stringify(updated));
-
-      const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-      const historyEntry: TradeHistory = {
-        ...targetPos,
-        pnlUsd: 0,
-        pnlPct: 0,
-        closedAt: timeStr,
-        closeReason: 'خروج دستی سربه‌سر بدون ضرر (Zero-Loss Cross Hedge Settled 🛡️)',
-      };
-      saveTradeToHistory(historyEntry);
-
-      showNotification(`🛡️ خروج سربه‌سر بدون ضرر نهایی شد: پوزیشن‌های هج شده در نقطه صفر ($0.00) تسویه شدند.`);
-    }
+    showNotification(
+      `✅ پوزیشن در صرافی بسته شد. نتیجهٔ نهایی: ${rawTotalPnl >= 0 ? '+' : ''}$${rawTotalPnl.toFixed(2)}`
+    );
   };
 
   // Manual trigger to immediately unwire counter-hedge leg and restore primary trade
